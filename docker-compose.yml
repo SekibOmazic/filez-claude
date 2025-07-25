@@ -23,7 +23,7 @@ services:
 
   # S3 Mock (Adobe S3Mock)
   s3mock:
-    image: adobe/s3mock:3.14.0
+    image: adobe/s3mock:4.6.0
     container_name: filez-s3mock
     environment:
       - initialBuckets=filemanager-bucket
