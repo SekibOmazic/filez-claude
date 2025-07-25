@@ -4,13 +4,16 @@ import io.filemanager.filez.config.TestcontainersConfiguration;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.test.context.ActiveProfiles;
 
-@Import(TestcontainersConfiguration.class)
 @SpringBootTest
+@Import(TestcontainersConfiguration.class)
+@ActiveProfiles("test")  // Use test profile to avoid conflicts
 class FilezApplicationTests {
 
 	@Test
 	void contextLoads() {
+		// This test verifies that the Spring application context loads successfully
+		// with all the beans configured properly, including database connections
 	}
-
 }

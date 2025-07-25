@@ -12,7 +12,8 @@ public class TestcontainersConfiguration {
 
 	@Bean
 	public S3MockContainer s3mock() {
-		return new S3MockContainer("4.6.0")  // Match the library version
+		return new S3MockContainer("4.6.0")
+				.withValidKmsKeys("arn:aws:kms:eu-central-1:1234567890:key/valid-test-key-ref")
 				.withInitialBuckets("filemanager-bucket");
 	}
 

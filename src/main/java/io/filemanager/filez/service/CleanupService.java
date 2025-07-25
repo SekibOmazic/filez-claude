@@ -13,34 +13,37 @@ import java.time.LocalDateTime;
 
 @Service
 public class CleanupService {
-    
+
     private static final Logger logger = LoggerFactory.getLogger(CleanupService.class);
-    
+
     private final FileRepository fileRepository;
     private final AppProperties appProperties;
-    
+
     public CleanupService(FileRepository fileRepository, AppProperties appProperties) {
         this.fileRepository = fileRepository;
         this.appProperties = appProperties;
     }
-    
+
     /**
      * Scheduled job to cleanup failed/stuck uploads.
      * Runs every 5 minutes to mark old UPLOADING/SCANNING files as FAILED.
+     *
+     * Fixed: Use fixedRate instead of SpEL expression that was causing bean resolution issues
      */
-    @Scheduled(fixedRateString = "#{@appProperties.upload().tempCleanupInterval().toMillis()}")
+    @Scheduled(fixedRate = 300000) // 5 minutes in milliseconds (300,000ms = 5min)
     public void cleanupFailedUploads() {
+        // Calculate cutoff time based on configured interval
         LocalDateTime cutoffTime = LocalDateTime.now()
                 .minus(appProperties.upload().tempCleanupInterval())
                 .minusMinutes(10); // Add extra buffer
-        
+
         logger.info("Starting cleanup of failed uploads before: {}", cutoffTime);
-        
+
         // Find and update UPLOADING files that are stuck
         fileRepository.findByStatusAndCreatedAtBefore(FileStatus.UPLOADING, cutoffTime)
                 .flatMap(fileEntity -> {
-                    logger.warn("Marking stuck UPLOADING file as FAILED: {} (created: {})", 
-                               fileEntity.id(), fileEntity.createdAt());
+                    logger.warn("Marking stuck UPLOADING file as FAILED: {} (created: {})",
+                            fileEntity.id(), fileEntity.createdAt());
                     return fileRepository.save(fileEntity.withStatus(FileStatus.FAILED));
                 })
                 .count()
@@ -48,8 +51,8 @@ public class CleanupService {
                     // Find and update SCANNING files that are stuck
                     return fileRepository.findByStatusAndCreatedAtBefore(FileStatus.SCANNING, cutoffTime)
                             .flatMap(fileEntity -> {
-                                logger.warn("Marking stuck SCANNING file as FAILED: {} (created: {})", 
-                                           fileEntity.id(), fileEntity.createdAt());
+                                logger.warn("Marking stuck SCANNING file as FAILED: {} (created: {})",
+                                        fileEntity.id(), fileEntity.createdAt());
                                 return fileRepository.save(fileEntity.withStatus(FileStatus.FAILED));
                             })
                             .count()

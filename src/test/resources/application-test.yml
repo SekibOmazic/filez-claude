@@ -1,0 +1,36 @@
+spring:
+  # Testcontainers will override these with actual container connection details
+  # via @ServiceConnection
+  r2dbc:
+    # These will be dynamically set by Testcontainers
+    url: r2dbc:postgresql://localhost:5432/test
+    username: test
+    password: test
+
+logging:
+  level:
+    io.filemanager: DEBUG
+    org.testcontainers: INFO
+    org.springframework.r2dbc: DEBUG
+
+app:
+  s3:
+    # These will be dynamically set by Testcontainers S3Mock
+    endpoint: http://localhost:9090
+    region: us-east-1
+    bucket: filemanager-bucket
+    access-key: accessKey
+    secret-key: secretKey
+    path-style-access: true
+
+  av-scan:
+    endpoint: http://localhost:8081/scan
+    timeout: 30s  # Shorter timeout for tests
+
+  callback:
+    base-url: http://localhost:8080
+
+  upload:
+    max-file-size: 1GB  # Smaller for tests
+    allowed-types: "*"
+    temp-cleanup-interval: 60s  # Faster cleanup for tests

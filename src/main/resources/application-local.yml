@@ -1,11 +1,22 @@
-# Local development configuration
-# This file is automatically loaded when running with Testcontainers
+# src/main/resources/application-local.yml
+# Local development configuration - works with both Testcontainers and manual services
 
 spring:
+  profiles:
+    active: local
+
   r2dbc:
     url: r2dbc:postgresql://localhost:${POSTGRES_PORT:5432}/filemanager
     username: filemanager
     password: filemanager
+
+# Control local development behavior
+testcontainers:
+  enabled: true  # false = manual service management, true = automatic via TestFilezApplication
+
+app:
+  local:
+    show-instructions: true  # Show manual setup help when testcontainers.enabled=false
 
 logging:
   level:
@@ -29,3 +40,33 @@ app:
 
   callback:
     base-url: http://localhost:8080
+
+  upload:
+    max-file-size: 5GB
+    allowed-types: "*"
+    temp-cleanup-interval: 300s
+
+---
+# Production-like profile using Docker Compose services
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  r2dbc:
+    url: r2dbc:postgresql://localhost:5432/filemanager
+    username: filemanager
+    password: filemanager
+
+# Disable Testcontainers for Docker Compose setup
+testcontainers:
+  postgres:
+    enabled: false
+  s3mock:
+    enabled: false
+
+app:
+  s3:
+    endpoint: http://localhost:9090
+  av-scan:
+    endpoint: http://localhost:8081/scan
