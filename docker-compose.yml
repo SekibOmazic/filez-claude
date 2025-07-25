@@ -1,0 +1,81 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: filez-postgres
+    environment:
+      POSTGRES_DB: filemanager
+      POSTGRES_USER: filemanager
+      POSTGRES_PASSWORD: filemanager
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U filemanager -d filemanager"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - filez-network
+
+  # S3 Mock (Adobe S3Mock)
+  s3mock:
+    image: adobe/s3mock:3.14.0
+    container_name: filez-s3mock
+    environment:
+      - initialBuckets=filemanager-bucket
+      - enableRetainFilesOnExit=false
+    ports:
+      - "9090:9090"
+    networks:
+      - filez-network
+
+  # Main Application
+  filez:
+    build: .
+    container_name: filez-app
+    environment:
+      SPRING_R2DBC_URL: r2dbc:postgresql://postgres:5432/filemanager
+      SPRING_R2DBC_USERNAME: filemanager
+      SPRING_R2DBC_PASSWORD: filemanager
+      APP_S3_ENDPOINT: http://s3mock:9090
+      APP_S3_BUCKET: filemanager-bucket
+      APP_S3_ACCESS_KEY: accessKey
+      APP_S3_SECRET_KEY: secretKey
+      APP_CALLBACK_BASE_URL: http://filez:8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      s3mock:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - filez-network
+
+  # Mock AVScan Service (for testing)
+  avscan-mock:
+    image: nginx:alpine
+    container_name: filez-avscan-mock
+    ports:
+      - "8081:80"
+    volumes:
+      - ./avscan-mock.conf:/etc/nginx/nginx.conf
+    networks:
+      - filez-network
+
+volumes:
+  postgres_data:
+
+networks:
+  filez-network:
+    driver: bridge

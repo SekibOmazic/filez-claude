@@ -1,0 +1,71 @@
+plugins {
+	id 'java'
+	id 'org.springframework.boot' version '4.0.0-SNAPSHOT'
+	id 'io.spring.dependency-management' version '1.1.7'
+}
+
+var awsSdkVersion = '2.32.2'
+
+group = 'io.filemanager'
+version = '0.0.1-SNAPSHOT'
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(21)
+	}
+}
+
+configurations {
+	compileOnly {
+		extendsFrom annotationProcessor
+	}
+}
+
+repositories {
+	mavenCentral()
+	maven { url = 'https://repo.spring.io/snapshot' }
+}
+
+dependencies {
+	implementation 'org.springframework.boot:spring-boot-starter-webflux'
+
+	// Spring Data R2DBC
+	implementation 'org.springframework.boot:spring-boot-starter-data-r2dbc'
+
+	// PostgreSQL R2DBC
+	runtimeOnly "org.postgresql:postgresql"
+	runtimeOnly "org.postgresql:r2dbc-postgresql"
+
+	// AWS SDK v2
+	implementation platform("software.amazon.awssdk:bom:${awsSdkVersion}")
+	implementation 'software.amazon.awssdk:s3'
+	implementation 'software.amazon.awssdk:netty-nio-client'
+
+	// Validation
+	implementation 'org.springframework.boot:spring-boot-starter-validation'
+
+	// JSON processing
+	implementation 'com.fasterxml.jackson.core:jackson-databind'
+	implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
+
+	// Actuator for health checks
+	implementation 'org.springframework.boot:spring-boot-starter-actuator'
+
+	// Configuration processor
+	annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
+
+
+	testImplementation "org.springframework.boot:spring-boot-starter-test"
+	testImplementation "io.projectreactor:reactor-test"
+	testImplementation "org.springframework.boot:spring-boot-testcontainers"
+	testImplementation "com.adobe.testing:s3mock-testcontainers:4.6.0"
+	testImplementation "org.testcontainers:postgresql"
+	testImplementation "org.testcontainers:r2dbc"
+	testImplementation "org.testcontainers:junit-jupiter"
+
+	testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+}
+
+tasks.named('test') {
+	useJUnitPlatform()
+}

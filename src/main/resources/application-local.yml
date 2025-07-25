@@ -1,0 +1,31 @@
+# Local development configuration
+# This file is automatically loaded when running with Testcontainers
+
+spring:
+  r2dbc:
+    url: r2dbc:postgresql://localhost:${POSTGRES_PORT:5432}/filemanager
+    username: filemanager
+    password: filemanager
+
+logging:
+  level:
+    io.filemanager: DEBUG
+    org.springframework.web.reactive: INFO
+    org.springframework.r2dbc: INFO
+    org.testcontainers: INFO
+
+app:
+  s3:
+    endpoint: http://localhost:${S3MOCK_PORT:9090}
+    region: us-east-1
+    bucket: filemanager-bucket
+    access-key: accessKey
+    secret-key: secretKey
+    path-style-access: true
+
+  av-scan:
+    endpoint: http://localhost:8081/scan
+    timeout: 300s
+
+  callback:
+    base-url: http://localhost:8080
