@@ -87,6 +87,7 @@ services:
       APP_S3_ACCESS_KEY: accessKey
       APP_S3_SECRET_KEY: secretKey
       APP_AV_SCAN_ENDPOINT: http://avscan-mock:8081/scan
+      # CRITICAL FIX: Use container name instead of localhost
       APP_CALLBACK_BASE_URL: http://filez:8080
 
       # Enable debug logging

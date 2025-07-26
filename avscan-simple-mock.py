@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Improved AVScan Mock Service
+Improved AVScan Mock Service with better connection handling
 Fixed version that properly handles streaming requests from Spring WebFlux
 """
 
@@ -11,6 +11,7 @@ import random
 import logging
 import traceback
 from werkzeug.exceptions import BadRequest
+import socket
 
 app = Flask(__name__)
 
@@ -25,10 +26,53 @@ logger = logging.getLogger(__name__)
 werkzeug_logger = logging.getLogger('werkzeug')
 werkzeug_logger.setLevel(logging.INFO)
 
+def test_callback_connectivity(target_url):
+    """Test if the callback URL is reachable"""
+    try:
+        # Extract host and port from URL
+        if target_url.startswith('http://'):
+            url_part = target_url[7:]  # Remove http://
+        elif target_url.startswith('https://'):
+            url_part = target_url[8:]  # Remove https://
+        else:
+            url_part = target_url
+
+        # Split host and path
+        if '/' in url_part:
+            host_port = url_part.split('/')[0]
+        else:
+            host_port = url_part
+
+        if ':' in host_port:
+            host, port = host_port.split(':')
+            port = int(port)
+        else:
+            host = host_port
+            port = 80 if target_url.startswith('http://') else 443
+
+        logger.info(f"🔌 Testing connectivity to {host}:{port}")
+
+        # Test socket connection
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        result = sock.connect_ex((host, port))
+        sock.close()
+
+        if result == 0:
+            logger.info(f"✅ Connection successful to {host}:{port}")
+            return True
+        else:
+            logger.error(f"❌ Connection failed to {host}:{port} - error code: {result}")
+            return False
+
+    except Exception as e:
+        logger.error(f"❌ Connectivity test error: {e}")
+        return False
+
 @app.route('/scan', methods=['POST'])
 def scan_file():
     """
-    Improved scan endpoint with better error handling and logging
+    Improved scan endpoint with better error handling and connectivity testing
     """
     logger.info("=" * 60)
     logger.info("🔍 AVScan request received")
@@ -60,6 +104,13 @@ def scan_file():
         logger.info(f"🔖 Scan Reference ID: {scan_ref_id}")
         logger.info(f"📄 Original Filename: {original_filename}")
         logger.info(f"📄 Original Content-Type: {original_content_type}")
+
+        # Test callback connectivity BEFORE reading the file
+        logger.info("🔌 Testing callback connectivity...")
+        if not test_callback_connectivity(target_url):
+            logger.error("❌ Cannot reach callback URL. Check network connectivity.")
+            return Response("Cannot reach callback URL - check network configuration",
+                          status=500, content_type='text/plain')
 
         # Read the request body with multiple fallback methods
         logger.info("📖 Reading request body...")
@@ -150,40 +201,65 @@ def scan_file():
             for h_name, h_value in callback_headers.items():
                 logger.info(f"   {h_name}: {h_value}")
 
-            callback_response = requests.post(
-                target_url,
-                data=file_content,  # Send as raw bytes
-                headers=callback_headers,
-                timeout=300,  # 5 minute timeout
-                stream=False  # Don't stream the response (we need the status)
-            )
+            # Use a longer timeout and retry logic
+            max_retries = 3
+            retry_delay = 1
 
-            logger.info(f"📞 Callback response status: {callback_response.status_code}")
-            logger.info(f"📞 Callback response headers: {dict(callback_response.headers)}")
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"📞 Callback attempt {attempt + 1}/{max_retries}")
 
-            if callback_response.text:
-                logger.info(f"📞 Callback response body: {callback_response.text[:200]}...")
+                    callback_response = requests.post(
+                        target_url,
+                        data=file_content,  # Send as raw bytes
+                        headers=callback_headers,
+                        timeout=300,  # 5 minute timeout
+                        stream=False  # Don't stream the response (we need the status)
+                    )
 
-            if callback_response.status_code == 200:
-                logger.info(f"✅ Callback successful for: {scan_ref_id}")
-                return Response(f"SUCCESS: File scanned and forwarded ({file_size} bytes)",
-                              status=200, content_type='text/plain')
-            else:
-                logger.error(f"❌ Callback failed with status {callback_response.status_code}")
-                logger.error(f"❌ Callback error response: {callback_response.text}")
-                return Response(f"Callback failed: HTTP {callback_response.status_code}",
-                              status=500, content_type='text/plain')
+                    logger.info(f"📞 Callback response status: {callback_response.status_code}")
+                    logger.info(f"📞 Callback response headers: {dict(callback_response.headers)}")
 
-        except requests.exceptions.Timeout:
-            logger.error("❌ Callback request timed out")
-            return Response("Callback timeout", status=500, content_type='text/plain')
+                    if callback_response.text:
+                        logger.info(f"📞 Callback response body: {callback_response.text[:200]}...")
 
-        except requests.exceptions.ConnectionError as conn_err:
-            logger.error(f"❌ Callback connection error: {conn_err}")
-            return Response(f"Callback connection error: {str(conn_err)}", status=500, content_type='text/plain')
+                    if callback_response.status_code == 200:
+                        logger.info(f"✅ Callback successful for: {scan_ref_id}")
+                        return Response(f"SUCCESS: File scanned and forwarded ({file_size} bytes)",
+                                      status=200, content_type='text/plain')
+                    else:
+                        logger.error(f"❌ Callback failed with status {callback_response.status_code}")
+                        logger.error(f"❌ Callback error response: {callback_response.text}")
+
+                        if attempt < max_retries - 1:
+                            logger.info(f"🔄 Retrying in {retry_delay} seconds...")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2  # Exponential backoff
+                        else:
+                            return Response(f"Callback failed after {max_retries} attempts: HTTP {callback_response.status_code}",
+                                          status=500, content_type='text/plain')
+
+                except requests.exceptions.Timeout:
+                    logger.error(f"❌ Callback request timed out (attempt {attempt + 1})")
+                    if attempt < max_retries - 1:
+                        logger.info(f"🔄 Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                    else:
+                        return Response("Callback timeout after retries", status=500, content_type='text/plain')
+
+                except requests.exceptions.ConnectionError as conn_err:
+                    logger.error(f"❌ Callback connection error (attempt {attempt + 1}): {conn_err}")
+                    if attempt < max_retries - 1:
+                        logger.info(f"🔄 Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                    else:
+                        return Response(f"Callback connection error after retries: {str(conn_err)}",
+                                      status=500, content_type='text/plain')
 
         except Exception as callback_error:
-            logger.error(f"❌ Callback error: {callback_error}")
+            logger.error(f"❌ Unexpected callback error: {callback_error}")
             logger.error(f"❌ Callback error traceback: {traceback.format_exc()}")
             return Response(f"Callback error: {str(callback_error)}", status=500, content_type='text/plain')
 
@@ -233,17 +309,30 @@ def test_endpoint():
     """Simple test endpoint"""
     return Response("AVScan Mock Test Endpoint OK", status=200, content_type='text/plain')
 
+@app.route('/connectivity-test', methods=['GET'])
+def connectivity_test():
+    """Test connectivity to the main application"""
+    test_url = request.args.get('url', 'http://filez:8080/actuator/health')
+    logger.info(f"🔌 Testing connectivity to: {test_url}")
+
+    if test_callback_connectivity(test_url):
+        return Response(f"✅ Can reach {test_url}", status=200, content_type='text/plain')
+    else:
+        return Response(f"❌ Cannot reach {test_url}", status=500, content_type='text/plain')
+
 if __name__ == '__main__':
     print("🚀 Starting Improved AVScan Mock Service")
     print("   Port: 8081")
     print("   Features:")
     print("   - Comprehensive request logging")
     print("   - Multiple content reading strategies")
-    print("   - Better error handling")
+    print("   - Better error handling with retries")
     print("   - Detailed callback debugging")
+    print("   - Connectivity testing")
     print("   - Health check: http://localhost:8081/health")
     print("   - Debug endpoint: http://localhost:8081/debug")
     print("   - Test endpoint: http://localhost:8081/test")
+    print("   - Connectivity test: http://localhost:8081/connectivity-test?url=http://filez:8080/actuator/health")
 
     app.run(
         host='0.0.0.0',

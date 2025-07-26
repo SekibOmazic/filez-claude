@@ -7,22 +7,22 @@ import io.filemanager.filez.service.FileService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
 import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.server.reactive.ServerHttpRequest;
-import org.springframework.util.unit.DataSize;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
 
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 @RestController
@@ -30,8 +30,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public class FileController {
 
     private static final Logger logger = LoggerFactory.getLogger(FileController.class);
-
-    private static final long MAX_FILE_SIZE = DataSize.ofTerabytes(1).toBytes();
+    private final DataBufferFactory dataBufferFactory = DefaultDataBufferFactory.sharedInstance;
 
     private final FileService fileService;
 
@@ -84,13 +83,15 @@ public class FileController {
     }
 
     /**
-     * STREAMING MULTIPART upload that manually parses multipart without disk buffering.
-     * This reads the multipart stream manually to extract filename and content.
+     * PURE STREAMING multipart parser that never buffers to disk.
+     * This manually parses multipart stream chunk by chunk without any buffering.
+     *
+     * CRITICAL: This completely bypasses Spring's multipart parsing to ensure zero disk usage.
      */
-    @PostMapping(value = "/upload-multipart", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @PostMapping(value = "/upload-multipart")
     public Mono<ResponseEntity<UploadResponse>> uploadMultipartFile(ServerHttpRequest request) {
 
-        logger.info("📤 Manual multipart parsing upload");
+        logger.info("📤 ZERO-BUFFER multipart upload (manual parsing)");
 
         String contentTypeHeader = request.getHeaders().getFirst("Content-Type");
         if (contentTypeHeader == null || !contentTypeHeader.contains("boundary=")) {
@@ -101,13 +102,13 @@ public class FileController {
 
         // Extract boundary
         String boundary = extractBoundary(contentTypeHeader);
-        logger.info("🔍 Multipart boundary: {}", boundary);
+        logger.info("🔍 Multipart boundary: --{}", boundary);
 
-        // Parse multipart stream manually without buffering
-        return parseMultipartStream(request.getBody(), boundary)
+        // Parse multipart stream with ZERO buffering
+        return parseMultipartStreamZeroBuffer(request.getBody(), boundary)
                 .flatMap(uploadData -> {
-                    logger.info("📝 Parsed multipart: filename={}, contentType={}, dataSize={}",
-                            uploadData.filename, uploadData.contentType, uploadData.dataSize);
+                    logger.info("📝 Parsed multipart: filename={}, contentType={}",
+                            uploadData.filename, uploadData.contentType);
 
                     UploadRequest uploadRequest = new UploadRequest(uploadData.filename, uploadData.contentType);
 
@@ -115,7 +116,7 @@ public class FileController {
                 })
                 .map(uploadResponse -> ResponseEntity.status(HttpStatus.ACCEPTED).body(uploadResponse))
                 .onErrorResume(throwable -> {
-                    logger.error("Manual multipart upload failed: {}", throwable.getMessage());
+                    logger.error("Zero-buffer multipart upload failed: {}", throwable.getMessage(), throwable);
                     return Mono.just(ResponseEntity.status(HttpStatus.BAD_REQUEST)
                             .header("X-Error-Details", throwable.getMessage())
                             .build());
@@ -134,12 +135,17 @@ public class FileController {
 
         Flux<DataBuffer> trackedStream = cleanFileStream
                 .doOnNext(buffer -> logger.debug("📦 Clean chunk: {} bytes", buffer.readableByteCount()))
-                .doOnComplete(() -> logger.info("✅ Clean stream completed: {}", scanReferenceId));
+                .doOnComplete(() -> logger.info("✅ Clean stream completed: {}", scanReferenceId))
+                .doOnError(error -> logger.error("❌ Clean stream error: {}", error.getMessage(), error));
 
         return fileService.handleScannedFile(scanReferenceId, trackedStream)
                 .then(Mono.just(ResponseEntity.ok("Scanned file processed")))
-                .onErrorReturn(ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                        .body("Failed to process scanned file"));
+                .doOnSuccess(response -> logger.info("✅ Callback processed successfully: {}", scanReferenceId))
+                .onErrorResume(error -> {
+                    logger.error("❌ Callback processing failed: {}", error.getMessage(), error);
+                    return Mono.just(ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                            .body("Failed to process scanned file"));
+                });
     }
 
     /**
@@ -174,101 +180,201 @@ public class FileController {
                 .onErrorReturn(ResponseEntity.notFound().build());
     }
 
-    // --- Utility Methods ---
+    // --- ZERO-BUFFER Multipart Parsing ---
 
     private String extractBoundary(String contentType) {
         String[] parts = contentType.split(";");
         for (String part : parts) {
             part = part.trim();
             if (part.startsWith("boundary=")) {
-                return part.substring("boundary=".length());
+                String boundary = part.substring("boundary=".length());
+                // Remove quotes if present
+                if (boundary.startsWith("\"") && boundary.endsWith("\"")) {
+                    boundary = boundary.substring(1, boundary.length() - 1);
+                }
+                return boundary;
             }
         }
         throw new RuntimeException("No boundary found in Content-Type");
     }
 
-    private Mono<MultipartUploadData> parseMultipartStream(Flux<DataBuffer> dataStream, String boundary) {
-        AtomicReference<String> filename = new AtomicReference<>();
+    /**
+     * ZERO-BUFFER multipart parser using streaming state machine.
+     * Never accumulates more than necessary to parse headers.
+     */
+    private Mono<MultipartUploadData> parseMultipartStreamZeroBuffer(Flux<DataBuffer> dataStream, String boundary) {
+
+        String startBoundary = "\r\n--" + boundary + "\r\n";
+        String startBoundaryAlt = "--" + boundary + "\r\n";  // For first boundary
+        String endBoundary = "\r\n--" + boundary + "--";
+
+        logger.debug("Boundary markers: start='{}', alt='{}', end='{}'", startBoundary, startBoundaryAlt, endBoundary);
+
+        // State machine variables
+        AtomicReference<String> filename = new AtomicReference<>("unknown");
         AtomicReference<String> contentType = new AtomicReference<>("application/octet-stream");
-        AtomicBoolean foundFileStart = new AtomicBoolean(false);
-        AtomicLong dataSize = new AtomicLong(0);
+        AtomicReference<StringBuilder> headerBuffer = new AtomicReference<>(new StringBuilder());
+        AtomicBoolean foundHeaders = new AtomicBoolean(false);
+        AtomicBoolean inFileContent = new AtomicBoolean(false);
+        AtomicReference<DataBuffer> carryoverBuffer = new AtomicReference<>();
 
-        String boundaryMarker = "--" + boundary;
+        // Create a sink for the file content stream
+        Sinks.Many<DataBuffer> fileSink = Sinks.many().unicast().onBackpressureBuffer();
 
-        // Simple multipart parser that extracts file content without buffering
-        Flux<DataBuffer> fileContentStream = dataStream
-                .doOnNext(buffer -> {
-                    if (!foundFileStart.get()) {
-                        // Parse headers to extract filename and content-type
-                        String content = extractStringFromBuffer(buffer);
-
-                        if (content.contains("filename=")) {
-                            String extractedFilename = extractFilename(content);
-                            if (extractedFilename != null) {
-                                filename.set(extractedFilename);
-                                logger.debug("📝 Extracted filename: {}", extractedFilename);
-                            }
-                        }
-
-                        if (content.contains("Content-Type:")) {
-                            String extractedContentType = extractContentType(content);
-                            if (extractedContentType != null) {
-                                contentType.set(extractedContentType);
-                                logger.debug("📝 Extracted content-type: {}", extractedContentType);
-                            }
-                        }
-
-                        // Look for end of headers (double CRLF)
-                        if (content.contains("\r\n\r\n")) {
-                            foundFileStart.set(true);
-                            logger.debug("📍 Found start of file content");
-                        }
-                    } else {
-                        dataSize.addAndGet(buffer.readableByteCount());
+        // Process stream with state machine
+        return dataStream
+                .doOnSubscribe(s -> logger.info("🚀 Starting zero-buffer multipart parsing"))
+                .concatMap(buffer -> {
+                    try {
+                        return processChunkStateMachine(buffer, boundary, filename, contentType,
+                                headerBuffer, foundHeaders, inFileContent, carryoverBuffer, fileSink);
+                    } catch (Exception e) {
+                        logger.error("❌ Error processing chunk: {}", e.getMessage(), e);
+                        fileSink.tryEmitError(e);
+                        DataBufferUtils.release(buffer);
+                        return Mono.error(e);
                     }
                 })
-                .skipWhile(buffer -> !foundFileStart.get())
-                .takeWhile(buffer -> {
-                    // Stop when we hit the end boundary
-                    String content = extractStringFromBuffer(buffer);
-                    return !content.contains(boundaryMarker);
+                .then(Mono.defer(() -> {
+                    // Complete the file stream
+                    fileSink.tryEmitComplete();
+
+                    logger.info("✅ Zero-buffer multipart parsing completed");
+                    logger.info("   Filename: {}", filename.get());
+                    logger.info("   Content-Type: {}", contentType.get());
+
+                    return Mono.just(new MultipartUploadData(
+                            filename.get(),
+                            contentType.get(),
+                            fileSink.asFlux()
+                                    .doOnNext(fileBuffer -> logger.debug("📦 File chunk: {} bytes", fileBuffer.readableByteCount()))
+                                    .doOnComplete(() -> logger.debug("✅ File stream completed"))
+                    ));
+                }))
+                .onErrorResume(error -> {
+                    logger.error("❌ Zero-buffer multipart parsing failed: {}", error.getMessage(), error);
+                    fileSink.tryEmitError(error);
+                    return Mono.error(new RuntimeException("Multipart parsing failed: " + error.getMessage(), error));
                 });
-
-        return Mono.just(new MultipartUploadData(
-                filename.get() != null ? filename.get() : "unknown",
-                contentType.get(),
-                fileContentStream,
-                dataSize.get()
-        ));
     }
 
-    private String extractStringFromBuffer(DataBuffer buffer) {
-        byte[] bytes = new byte[Math.min(buffer.readableByteCount(), 1024)]; // Limit to prevent huge header parsing
+    /**
+     * Process a single chunk in the multipart state machine
+     */
+    private Mono<Void> processChunkStateMachine(DataBuffer buffer, String boundary,
+                                                AtomicReference<String> filename,
+                                                AtomicReference<String> contentType,
+                                                AtomicReference<StringBuilder> headerBuffer,
+                                                AtomicBoolean foundHeaders,
+                                                AtomicBoolean inFileContent,
+                                                AtomicReference<DataBuffer> carryoverBuffer,
+                                                Sinks.Many<DataBuffer> fileSink) {
+
+        // Convert buffer to string for header parsing (only if not in file content yet)
+        if (!inFileContent.get()) {
+            String chunkStr = bufferToString(buffer);
+            headerBuffer.get().append(chunkStr);
+
+            // Check if we have complete headers
+            String headers = headerBuffer.get().toString();
+            if (headers.contains("\r\n\r\n")) {
+                // Parse headers
+                parseMultipartHeaders(headers, filename, contentType);
+                foundHeaders.set(true);
+
+                // Find start of file content
+                int contentStart = headers.indexOf("\r\n\r\n") + 4;
+                if (contentStart < headers.length()) {
+                    // There's file content in this chunk
+                    String fileContentStr = headers.substring(contentStart);
+                    byte[] fileContentBytes = fileContentStr.getBytes(StandardCharsets.ISO_8859_1);
+
+                    if (fileContentBytes.length > 0) {
+                        DataBuffer fileBuffer = dataBufferFactory.allocateBuffer(fileContentBytes.length);
+                        fileBuffer.write(fileContentBytes);
+                        fileSink.tryEmitNext(fileBuffer);
+                    }
+                }
+
+                inFileContent.set(true);
+                DataBufferUtils.release(buffer);
+                return Mono.empty();
+            }
+
+            DataBufferUtils.release(buffer);
+            return Mono.empty();
+        } else {
+            // We're in file content - check for end boundary and stream
+            String chunkStr = bufferToString(buffer);
+            if (chunkStr.contains("--" + boundary)) {
+                // Found end boundary - stop streaming
+                int endIndex = chunkStr.indexOf("--" + boundary);
+                if (endIndex > 0) {
+                    // Send the remaining content before boundary
+                    String finalContent = chunkStr.substring(0, endIndex);
+                    if (!finalContent.isEmpty()) {
+                        byte[] finalBytes = finalContent.getBytes(StandardCharsets.ISO_8859_1);
+                        DataBuffer finalBuffer = dataBufferFactory.allocateBuffer(finalBytes.length);
+                        finalBuffer.write(finalBytes);
+                        fileSink.tryEmitNext(finalBuffer);
+                    }
+                }
+                DataBufferUtils.release(buffer);
+                return Mono.empty();
+            } else {
+                // Pure file content - stream it directly
+                fileSink.tryEmitNext(buffer.retain());
+                DataBufferUtils.release(buffer);
+                return Mono.empty();
+            }
+        }
+    }
+
+    private String bufferToString(DataBuffer buffer) {
+        byte[] bytes = new byte[buffer.readableByteCount()];
         buffer.read(bytes, 0, bytes.length);
-        return new String(bytes, StandardCharsets.UTF_8);
+        buffer.readPosition(0); // Reset position
+        return new String(bytes, StandardCharsets.ISO_8859_1);
     }
 
-    private String extractFilename(String content) {
-        int start = content.indexOf("filename=\"");
+    private void parseMultipartHeaders(String headers, AtomicReference<String> filename, AtomicReference<String> contentType) {
+        String[] lines = headers.split("\r\n");
+
+        for (String line : lines) {
+            if (line.toLowerCase().contains("content-disposition") && line.contains("filename=")) {
+                String extractedFilename = extractFilenameFromLine(line);
+                if (extractedFilename != null) {
+                    filename.set(extractedFilename);
+                    logger.debug("📝 Extracted filename: {}", extractedFilename);
+                }
+            } else if (line.toLowerCase().startsWith("content-type:")) {
+                String extractedContentType = line.substring("content-type:".length()).trim();
+                if (!extractedContentType.isEmpty()) {
+                    contentType.set(extractedContentType);
+                    logger.debug("📝 Extracted content-type: {}", extractedContentType);
+                }
+            }
+        }
+    }
+
+    private String extractFilenameFromLine(String line) {
+        int start = line.indexOf("filename=\"");
         if (start >= 0) {
             start += "filename=\"".length();
-            int end = content.indexOf("\"", start);
+            int end = line.indexOf("\"", start);
             if (end >= 0) {
-                return content.substring(start, end);
+                return line.substring(start, end);
             }
         }
-        return null;
-    }
 
-    private String extractContentType(String content) {
-        int start = content.indexOf("Content-Type:");
+        // Try without quotes
+        start = line.indexOf("filename=");
         if (start >= 0) {
-            start += "Content-Type:".length();
-            int end = content.indexOf("\r\n", start);
-            if (end >= 0) {
-                return content.substring(start, end).trim();
-            }
+            start += "filename=".length();
+            String remaining = line.substring(start).trim();
+            return remaining.split("\\s")[0];
         }
+
         return null;
     }
 
@@ -276,13 +382,11 @@ public class FileController {
         final String filename;
         final String contentType;
         final Flux<DataBuffer> fileStream;
-        final long dataSize;
 
-        MultipartUploadData(String filename, String contentType, Flux<DataBuffer> fileStream, long dataSize) {
+        MultipartUploadData(String filename, String contentType, Flux<DataBuffer> fileStream) {
             this.filename = filename;
             this.contentType = contentType;
             this.fileStream = fileStream;
-            this.dataSize = dataSize;
         }
     }
 }

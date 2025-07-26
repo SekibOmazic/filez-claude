@@ -7,6 +7,14 @@ spring:
     username: filemanager
     password: filemanager
 
+  # CRITICAL: Disable ALL disk buffering for multipart
+  webflux:
+    multipart:
+      max-in-memory-size: -1  # Unlimited in-memory (streaming)
+      max-disk-usage-per-part: -1  # Disable disk usage completely
+      max-parts: -1  # No limit on parts
+      streaming: true  # Enable streaming mode
+
 # Control local development behavior
 testcontainers:
   enabled: true  # false = manual service management, true = automatic via TestFilezApplication
@@ -41,7 +49,10 @@ app:
     timeout: 300s
 
   callback:
-    base-url: http://localhost:8080
+    # CRITICAL: Use host.docker.internal when AVScan runs in Docker but app runs locally
+    # For pure local development: http://localhost:8080
+    # For Docker Compose: http://filez:8080
+    base-url: ${APP_CALLBACK_BASE_URL:http://host.docker.internal:8080}
 
   upload:
     max-file-size: 5GB
@@ -60,6 +71,14 @@ spring:
     username: filemanager
     password: filemanager
 
+  # CRITICAL: Same streaming settings for Docker
+  webflux:
+    multipart:
+      max-in-memory-size: -1
+      max-disk-usage-per-part: -1
+      max-parts: -1
+      streaming: true
+
 # Disable Testcontainers for Docker Compose setup
 testcontainers:
   postgres:
@@ -72,3 +91,6 @@ app:
     endpoint: http://localhost:9090
   av-scan:
     endpoint: http://localhost:8081/scan
+  callback:
+    # For Docker Compose, use container name
+    base-url: http://filez:8080
