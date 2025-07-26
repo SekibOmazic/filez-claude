@@ -33,6 +33,22 @@ services:
     networks:
       - filez-network
 
+  # Python AVScan Mock Service (Simpler and more reliable)
+  avscan-mock:
+    build:
+      context: .
+      dockerfile: Dockerfile.avscan-mock
+    container_name: filez-avscan-mock
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - filez-network
+
   # Main Application
   filez:
     build: .
@@ -45,6 +61,7 @@ services:
       APP_S3_BUCKET: filemanager-bucket
       APP_S3_ACCESS_KEY: accessKey
       APP_S3_SECRET_KEY: secretKey
+      APP_AV_SCAN_ENDPOINT: http://avscan-mock:8081/scan
       APP_CALLBACK_BASE_URL: http://filez:8080
     ports:
       - "8080:8080"
@@ -53,23 +70,14 @@ services:
         condition: service_healthy
       s3mock:
         condition: service_started
+      avscan-mock:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
-    networks:
-      - filez-network
-
-  # Mock AVScan Service (for testing)
-  avscan-mock:
-    image: nginx:alpine
-    container_name: filez-avscan-mock
-    ports:
-      - "8081:80"
-    volumes:
-      - ./avscan-mock.conf:/etc/nginx/nginx.conf
     networks:
       - filez-network
 

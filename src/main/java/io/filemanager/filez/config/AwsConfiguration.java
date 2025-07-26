@@ -43,7 +43,6 @@ public class AwsConfiguration {
                 .endpointOverride(URI.create(s3Props.endpoint()))
                 .serviceConfiguration(s3Config)
                 .httpClient(httpClient)
-                // REMOVED: .forcePathStyle() - this was the duplicate!
                 .build();
     }
 }

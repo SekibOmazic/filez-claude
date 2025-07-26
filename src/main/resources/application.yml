@@ -6,7 +6,6 @@ spring:
     multipart:
       max-in-memory-size: 1MB
       max-disk-usage-per-part: 0
-      streaming: true  # Enable streaming for Spring Boot 4.0
 
   r2dbc:
     url: r2dbc:postgresql://localhost:5432/filemanager
@@ -22,7 +21,7 @@ server:
   port: 8080
   max-http-header-size: 64KB
   http2:
-    enabled: true  # Enable HTTP/2 support in Spring Boot 4.0
+    enabled: true
 
 logging:
   level:

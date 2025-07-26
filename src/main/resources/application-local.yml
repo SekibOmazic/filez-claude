@@ -2,9 +2,6 @@
 # Local development configuration - works with both Testcontainers and manual services
 
 spring:
-  profiles:
-    active: local
-
   r2dbc:
     url: r2dbc:postgresql://localhost:${POSTGRES_PORT:5432}/filemanager
     username: filemanager
@@ -14,10 +11,6 @@ spring:
 testcontainers:
   enabled: true  # false = manual service management, true = automatic via TestFilezApplication
 
-app:
-  local:
-    show-instructions: true  # Show manual setup help when testcontainers.enabled=false
-
 logging:
   level:
     io.filemanager: DEBUG
@@ -25,7 +18,11 @@ logging:
     org.springframework.r2dbc: INFO
     org.testcontainers: INFO
 
+# Single app configuration section
 app:
+  local:
+    show-instructions: true  # Show manual setup help when testcontainers.enabled=false
+
   s3:
     endpoint: http://localhost:${S3MOCK_PORT:9090}
     region: us-east-1
