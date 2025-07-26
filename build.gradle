@@ -2,6 +2,7 @@ plugins {
 	id 'java'
 	id 'org.springframework.boot' version '4.0.0-SNAPSHOT'
 	id 'io.spring.dependency-management' version '1.1.7'
+	id 'org.flywaydb.flyway' version '10.10.0'
 }
 
 var awsSdkVersion = '2.32.2'
@@ -36,6 +37,14 @@ dependencies {
 	runtimeOnly "org.postgresql:postgresql"
 	runtimeOnly "org.postgresql:r2dbc-postgresql"
 
+	// Flyway for database migrations
+	implementation 'org.flywaydb:flyway-core'
+	implementation 'org.flywaydb:flyway-database-postgresql'
+
+	// JDBC driver for Flyway (separate from R2DBC)
+	implementation 'org.postgresql:postgresql'
+	implementation 'org.springframework:spring-jdbc'
+
 	// AWS SDK v2
 	implementation platform("software.amazon.awssdk:bom:${awsSdkVersion}")
 	implementation 'software.amazon.awssdk:s3'
@@ -53,7 +62,6 @@ dependencies {
 
 	// Configuration processor
 	annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
-
 
 	testImplementation "org.springframework.boot:spring-boot-starter-test"
 	testImplementation "io.projectreactor:reactor-test"

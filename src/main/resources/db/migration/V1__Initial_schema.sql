@@ -1,12 +1,14 @@
--- Database schema for file management system
+-- V1__Initial_schema.sql
+-- Flyway migration for file management system
 
+-- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- File status enum
 CREATE TYPE file_status AS ENUM ('UPLOADING', 'SCANNING', 'CLEAN', 'INFECTED', 'FAILED');
 
 -- Files table for metadata storage
-CREATE TABLE IF NOT EXISTS files (
+CREATE TABLE files (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     filename VARCHAR(255) NOT NULL,
     content_type VARCHAR(100) NOT NULL,
@@ -21,22 +23,22 @@ CREATE TABLE IF NOT EXISTS files (
 );
 
 -- Indexes for performance
-CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
-CREATE INDEX IF NOT EXISTS idx_files_scan_reference_id ON files(scan_reference_id);
-CREATE INDEX IF NOT EXISTS idx_files_upload_session_id ON files(upload_session_id);
-CREATE INDEX IF NOT EXISTS idx_files_created_at ON files(created_at);
-CREATE INDEX IF NOT EXISTS idx_files_status_created_at ON files(status, created_at);
+CREATE INDEX idx_files_status ON files(status);
+CREATE INDEX idx_files_scan_reference_id ON files(scan_reference_id);
+CREATE INDEX idx_files_upload_session_id ON files(upload_session_id);
+CREATE INDEX idx_files_created_at ON files(created_at);
+CREATE INDEX idx_files_status_created_at ON files(status, created_at);
 
+-- Function for updating updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()
-RETURNS TRIGGER AS '
+RETURNS TRIGGER AS $$
 BEGIN
     NEW.updated_at = NOW();
     RETURN NEW;
 END;
-' LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 
 -- Create trigger
-DROP TRIGGER IF EXISTS update_files_updated_at ON files;
 CREATE TRIGGER update_files_updated_at
     BEFORE UPDATE ON files
     FOR EACH ROW

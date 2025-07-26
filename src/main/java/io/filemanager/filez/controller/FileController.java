@@ -47,10 +47,9 @@ public class FileController {
      */
     @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public Mono<ResponseEntity<UploadResponse>> uploadFile(
-            @RequestPart("file") Mono<FilePart> filePartMono,
-            @RequestPart("metadata") @Valid UploadRequest uploadRequest) {
+            @RequestPart("file") Mono<FilePart> filePartMono) {
 
-        logger.info("Received file upload request: {}", uploadRequest.filename());
+        logger.info("Received file upload request");
 
         return filePartMono
                 .flatMap(filePart -> {
@@ -59,14 +58,16 @@ public class FileController {
                         return Mono.error(new RuntimeException("Filename is required"));
                     }
 
-                    // Create upload request with actual file data
-                    UploadRequest actualRequest = new UploadRequest(
-                            filePart.filename(),
-                            uploadRequest.contentType() != null ? uploadRequest.contentType() :
-                                    determineContentType(filePart)
-                    );
+                    // Extract metadata from FilePart (no need for separate UploadRequest)
+                    String filename = filePart.filename();
+                    String contentType = determineContentType(filePart);
 
-                    // Get Content-Length if available (many clients don't send this for large files)
+                    // Create upload request from FilePart data
+                    UploadRequest uploadRequest = new UploadRequest(filename, contentType);
+
+                    logger.info("Processing file upload: {} ({})", filename, contentType);
+
+                    // Get Content-Length if available
                     Long declaredSize = getContentLength(filePart);
                     logger.info("File upload - declared size: {} bytes ({})",
                             declaredSize, declaredSize != null ? formatBytes(declaredSize) : "unknown");
@@ -77,7 +78,7 @@ public class FileController {
                     long startTime = System.currentTimeMillis();
 
                     Flux<DataBuffer> enhancedFileStream = filePart.content()
-                            .doOnSubscribe(subscription -> logger.info("Starting file stream for: {}", actualRequest.filename()))
+                            .doOnSubscribe(subscription -> logger.info("Starting file stream for: {}", filename))
                             .doOnNext(dataBuffer -> {
                                 long currentTotal = totalBytes.addAndGet(dataBuffer.readableByteCount());
 
@@ -95,7 +96,7 @@ public class FileController {
                                         long elapsed = System.currentTimeMillis() - startTime;
                                         double mbPerSecond = (currentTotal / 1024.0 / 1024.0) / (elapsed / 1000.0);
                                         logger.info("Upload progress - {}: {} ({} MB/s)",
-                                                actualRequest.filename(), formatBytes(currentTotal), String.format("%.2f", mbPerSecond));
+                                                filename, formatBytes(currentTotal), String.format("%.2f", mbPerSecond));
                                     }
                                 }
                             })
@@ -104,14 +105,14 @@ public class FileController {
                                 long elapsed = System.currentTimeMillis() - startTime;
                                 double mbPerSecond = (finalSize / 1024.0 / 1024.0) / (elapsed / 1000.0);
                                 logger.info("Upload stream completed - {}: {} in {}ms ({} MB/s)",
-                                        actualRequest.filename(), formatBytes(finalSize), elapsed, String.format("%.2f", mbPerSecond));
+                                        filename, formatBytes(finalSize), elapsed, String.format("%.2f", mbPerSecond));
                             })
                             .doOnError(error -> logger.error("Upload stream error for {}: {}",
-                                    actualRequest.filename(), error.getMessage()))
+                                    filename, error.getMessage()))
                             // Add timeout for really large files (24 hours)
                             .timeout(Duration.ofHours(24), Mono.error(new RuntimeException("Upload timeout after 24 hours")));
 
-                    return fileService.initiateUpload(actualRequest, enhancedFileStream);
+                    return fileService.initiateUpload(uploadRequest, enhancedFileStream);
                 })
                 .map(uploadResponse -> ResponseEntity.status(HttpStatus.ACCEPTED).body(uploadResponse))
                 .onErrorResume(throwable -> {
