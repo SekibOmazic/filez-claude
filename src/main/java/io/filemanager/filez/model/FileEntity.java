@@ -14,10 +14,8 @@ import java.util.UUID;
 public class FileEntity implements Persistable<UUID> {
 
     @Id
-    @Column("id")
     private UUID id;
 
-    @Column("filename")
     private String filename;
 
     @Column("content_type")
@@ -32,7 +30,6 @@ public class FileEntity implements Persistable<UUID> {
     @Column("upload_session_id")
     private UUID uploadSessionId;
 
-    @Column("status")
     private FileStatus status;
 
     @Column("scan_reference_id")
@@ -52,46 +49,29 @@ public class FileEntity implements Persistable<UUID> {
 
     // Default constructor for R2DBC
     public FileEntity() {
-        this.isNewEntity = false;
     }
 
-    // Full constructor - ensures all fields are explicitly set
-    public FileEntity(UUID id, String filename, String contentType, Long fileSize,
-                      String s3Key, UUID uploadSessionId, FileStatus status,
-                      String scanReferenceId, LocalDateTime createdAt,
-                      LocalDateTime updatedAt, LocalDateTime scannedAt) {
-        this.id = id;
-        this.filename = filename;
-        this.contentType = contentType;
-        this.fileSize = fileSize; // Can be null
-        this.s3Key = s3Key;
-        this.uploadSessionId = uploadSessionId;
-        this.status = status;
-        this.scanReferenceId = scanReferenceId;
-        this.createdAt = createdAt;
-        this.updatedAt = updatedAt;
-        this.scannedAt = scannedAt; // Can be null
-        this.isNewEntity = true; // New entity when using constructor
-    }
-
-    // Static factory method for new upload
+    // Builder-style factory method that ensures all fields are set
     public static FileEntity forNewUpload(UUID id, String filename, String contentType,
                                           String s3Key, UUID uploadSessionId,
                                           String scanReferenceId) {
+        FileEntity entity = new FileEntity();
         LocalDateTime now = LocalDateTime.now();
-        return new FileEntity(
-                id,
-                filename,
-                contentType,
-                null, // fileSize - explicitly null
-                s3Key,
-                uploadSessionId,
-                FileStatus.UPLOADING,
-                scanReferenceId,
-                now, // createdAt
-                now, // updatedAt
-                null  // scannedAt - explicitly null
-        );
+
+        entity.id = id;
+        entity.filename = filename;
+        entity.contentType = contentType;
+        entity.fileSize = null; // Must be explicitly null
+        entity.s3Key = s3Key;
+        entity.uploadSessionId = uploadSessionId;
+        entity.status = FileStatus.UPLOADING;
+        entity.scanReferenceId = scanReferenceId;
+        entity.createdAt = now;
+        entity.updatedAt = now;
+        entity.scannedAt = null; // Must be explicitly null
+        entity.isNewEntity = true;
+
+        return entity;
     }
 
     @Override
@@ -108,34 +88,41 @@ public class FileEntity implements Persistable<UUID> {
         this.isNewEntity = false;
     }
 
-    // Helper methods that return new instances
+    // Copy constructor for updates
+    private FileEntity(FileEntity source) {
+        this.id = source.id;
+        this.filename = source.filename;
+        this.contentType = source.contentType;
+        this.fileSize = source.fileSize;
+        this.s3Key = source.s3Key;
+        this.uploadSessionId = source.uploadSessionId;
+        this.status = source.status;
+        this.scanReferenceId = source.scanReferenceId;
+        this.createdAt = source.createdAt;
+        this.updatedAt = source.updatedAt;
+        this.scannedAt = source.scannedAt;
+        this.isNewEntity = false;
+    }
+
     public FileEntity withFileSize(Long fileSize) {
-        FileEntity updated = new FileEntity(
-                this.id, this.filename, this.contentType, fileSize, this.s3Key,
-                this.uploadSessionId, this.status, this.scanReferenceId,
-                this.createdAt, LocalDateTime.now(), this.scannedAt
-        );
-        updated.isNewEntity = false;
+        FileEntity updated = new FileEntity(this);
+        updated.fileSize = fileSize;
+        updated.updatedAt = LocalDateTime.now();
         return updated;
     }
 
     public FileEntity withStatus(FileStatus status) {
-        FileEntity updated = new FileEntity(
-                this.id, this.filename, this.contentType, this.fileSize, this.s3Key,
-                this.uploadSessionId, status, this.scanReferenceId,
-                this.createdAt, LocalDateTime.now(), this.scannedAt
-        );
-        updated.isNewEntity = false;
+        FileEntity updated = new FileEntity(this);
+        updated.status = status;
+        updated.updatedAt = LocalDateTime.now();
         return updated;
     }
 
     public FileEntity withScanComplete() {
-        FileEntity updated = new FileEntity(
-                this.id, this.filename, this.contentType, this.fileSize, this.s3Key,
-                this.uploadSessionId, FileStatus.CLEAN, this.scanReferenceId,
-                this.createdAt, LocalDateTime.now(), LocalDateTime.now()
-        );
-        updated.isNewEntity = false;
+        FileEntity updated = new FileEntity(this);
+        updated.status = FileStatus.CLEAN;
+        updated.updatedAt = LocalDateTime.now();
+        updated.scannedAt = LocalDateTime.now();
         return updated;
     }
 
@@ -151,7 +138,7 @@ public class FileEntity implements Persistable<UUID> {
     public LocalDateTime updatedAt() { return updatedAt; }
     public LocalDateTime scannedAt() { return scannedAt; }
 
-    // Setters for R2DBC
+    // Setters - R2DBC requires these for ResultSet mapping
     public void setId(UUID id) { this.id = id; }
     public void setFilename(String filename) { this.filename = filename; }
     public void setContentType(String contentType) { this.contentType = contentType; }
@@ -179,13 +166,7 @@ public class FileEntity implements Persistable<UUID> {
 
     @Override
     public String toString() {
-        return "FileEntity{" +
-                "id=" + id +
-                ", filename='" + filename + '\'' +
-                ", status=" + status +
-                ", fileSize=" + fileSize +
-                ", scannedAt=" + scannedAt +
-                ", isNew=" + isNewEntity +
-                '}';
+        return String.format("FileEntity{id=%s, filename='%s', status=%s, fileSize=%s, scannedAt=%s, isNew=%s}",
+                id, filename, status, fileSize, scannedAt, isNewEntity);
     }
 }

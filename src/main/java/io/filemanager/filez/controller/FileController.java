@@ -3,8 +3,9 @@ package io.filemanager.filez.controller;
 import io.filemanager.filez.dto.FileStatusResponse;
 import io.filemanager.filez.dto.UploadRequest;
 import io.filemanager.filez.dto.UploadResponse;
+import io.filemanager.filez.model.FileEntity;
+import io.filemanager.filez.repository.FileRepository;
 import io.filemanager.filez.service.FileService;
-import jakarta.validation.Valid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.buffer.DataBuffer;
@@ -40,8 +41,62 @@ public class FileController {
 
     private final FileService fileService;
 
-    public FileController(FileService fileService) {
+    private final FileRepository fileRepository;
+
+    public FileController(FileService fileService, FileRepository fileRepository) {
         this.fileService = fileService;
+        this.fileRepository = fileRepository;
+    }
+
+    // Add this as a simple test method in your FileController for debugging
+    @GetMapping("/test-entity")
+    public Mono<ResponseEntity<Map<String, Object>>> testEntityCreation() {
+        logger.info("=== TESTING ENTITY CREATION ===");
+
+        UUID fileId = UUID.randomUUID();
+        UUID uploadSessionId = UUID.randomUUID();
+        String scanReferenceId = UUID.randomUUID().toString();
+
+        FileEntity entity = FileEntity.forNewUpload(
+                fileId,
+                "test-file.txt",
+                "text/plain",
+                "files/test/test-file.txt",
+                uploadSessionId,
+                scanReferenceId
+        );
+
+        logger.info("Created test entity: {}", entity);
+        logger.info("Entity isNew(): {}", entity.isNew());
+        logger.info("All fields:");
+        logger.info("  id: {}", entity.getId());
+        logger.info("  filename: {}", entity.filename());
+        logger.info("  contentType: {}", entity.contentType());
+        logger.info("  fileSize: {}", entity.fileSize());
+        logger.info("  s3Key: {}", entity.s3Key());
+        logger.info("  uploadSessionId: {}", entity.uploadSessionId());
+        logger.info("  status: {}", entity.status());
+        logger.info("  scanReferenceId: {}", entity.scanReferenceId());
+        logger.info("  createdAt: {}", entity.createdAt());
+        logger.info("  updatedAt: {}", entity.updatedAt());
+        logger.info("  scannedAt: {}", entity.scannedAt());
+
+        // Try to save it
+        return fileRepository.save(entity)
+                .map(saved -> {
+                    Map<String, Object> result = new HashMap<>();
+                    result.put("success", true);
+                    result.put("entityId", saved.getId());
+                    result.put("isNew", saved.isNew());
+                    return ResponseEntity.ok(result);
+                })
+                .onErrorResume(error -> {
+                    logger.error("Save test failed: {}", error.getMessage(), error);
+                    Map<String, Object> result = new HashMap<>();
+                    result.put("success", false);
+                    result.put("error", error.getMessage());
+                    return Mono.just(ResponseEntity.badRequest().body(result));
+                });
     }
 
     /**

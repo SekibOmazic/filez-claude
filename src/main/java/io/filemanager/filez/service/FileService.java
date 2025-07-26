@@ -34,10 +34,7 @@ public class FileService {
     }
 
     /**
-     * Initiates file upload process:
-     * 1. Save metadata to database with UPLOADING status
-     * 2. Stream file content to AVScan service
-     * 3. Return upload response immediately (async processing)
+     * Initiates file upload process with enhanced debugging
      */
     @Transactional
     public Mono<UploadResponse> initiateUpload(UploadRequest request, Flux<DataBuffer> fileStream) {
@@ -46,10 +43,13 @@ public class FileService {
         String scanReferenceId = UUID.randomUUID().toString();
         String s3Key = s3Service.generateS3Key(uploadSessionId.toString(), request.filename());
 
-        logger.info("Initiating upload for file: {} (id: {}, session: {})",
-                request.filename(), fileId, uploadSessionId);
+        logger.info("=== UPLOAD INITIATION DEBUG ===");
+        logger.info("File: {} (id: {}, session: {})", request.filename(), fileId, uploadSessionId);
+        logger.info("Content-Type: {}", request.contentType());
+        logger.info("S3 Key: {}", s3Key);
+        logger.info("Scan Reference: {}", scanReferenceId);
 
-        // Use the static factory method for creating new upload
+        // Create entity using the factory method
         FileEntity fileEntity = FileEntity.forNewUpload(
                 fileId,
                 request.filename(),
@@ -59,26 +59,62 @@ public class FileService {
                 scanReferenceId
         );
 
-        logger.info("Created entity for save: {}", fileEntity);
+        logger.info("=== ENTITY DEBUG ===");
+        logger.info("Entity created: {}", fileEntity);
+        logger.info("Entity ID: {}", fileEntity.getId());
         logger.info("Entity isNew(): {}", fileEntity.isNew());
         logger.info("Entity fileSize: {}", fileEntity.fileSize());
         logger.info("Entity scannedAt: {}", fileEntity.scannedAt());
+        logger.info("Entity status: {}", fileEntity.status());
+
+        // Log all field values
+        logger.info("=== ALL ENTITY FIELDS ===");
+        logger.info("id: {}", fileEntity.getId());
+        logger.info("filename: {}", fileEntity.filename());
+        logger.info("contentType: {}", fileEntity.contentType());
+        logger.info("fileSize: {}", fileEntity.fileSize());
+        logger.info("s3Key: {}", fileEntity.s3Key());
+        logger.info("uploadSessionId: {}", fileEntity.uploadSessionId());
+        logger.info("status: {}", fileEntity.status());
+        logger.info("scanReferenceId: {}", fileEntity.scanReferenceId());
+        logger.info("createdAt: {}", fileEntity.createdAt());
+        logger.info("updatedAt: {}", fileEntity.updatedAt());
+        logger.info("scannedAt: {}", fileEntity.scannedAt());
 
         return fileRepository.save(fileEntity)
+                .doOnNext(saved -> {
+                    logger.info("=== SAVE SUCCESS ===");
+                    logger.info("Saved entity: {}", saved);
+                    logger.info("Saved entity isNew(): {}", saved.isNew());
+                })
                 .doOnError(error -> {
-                    logger.error("Database save failed for entity: {}", fileEntity);
-                    logger.error("Save error details: {}", error.getMessage(), error);
+                    logger.error("=== SAVE FAILED ===");
+                    logger.error("Failed to save entity: {}", fileEntity);
+                    logger.error("Error details: {}", error.getMessage(), error);
+
+                    // Log the specific SQL error if available
+                    if (error.getMessage() != null) {
+                        logger.error("SQL Error message: {}", error.getMessage());
+                    }
+
+                    Throwable cause = error.getCause();
+                    while (cause != null) {
+                        logger.error("Caused by: {} - {}", cause.getClass().getSimpleName(), cause.getMessage());
+                        cause = cause.getCause();
+                    }
                 })
                 .flatMap(savedEntity -> {
-                    logger.info("File metadata saved: {}", savedEntity.getId());
+                    logger.info("Initial save completed, updating to SCANNING status");
 
                     // Update status to SCANNING
                     FileEntity updatedEntity = savedEntity.withStatus(FileStatus.SCANNING);
-                    logger.info("Updating entity to SCANNING status: {}", updatedEntity);
+                    logger.info("Entity for SCANNING update: {}", updatedEntity);
 
                     return fileRepository.save(updatedEntity);
                 })
                 .flatMap(savedEntity -> {
+                    logger.info("Status updated to SCANNING, sending to AVScan");
+
                     // Send file stream to AVScan service (fire and forget)
                     avScanService.scanFile(fileStream, scanReferenceId, request.filename(), request.contentType())
                             .doOnSuccess(response -> logger.info("File sent to AVScan: {}", scanReferenceId))
@@ -104,7 +140,6 @@ public class FileService {
 
     /**
      * Handles scanned file callback from AVScan service.
-     * Streams clean content directly to S3 and updates metadata.
      */
     @Transactional
     public Mono<Void> handleScannedFile(String scanReferenceId, Flux<DataBuffer> cleanFileStream) {

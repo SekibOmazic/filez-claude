@@ -9,17 +9,27 @@ services:
       POSTGRES_DB: filemanager
       POSTGRES_USER: filemanager
       POSTGRES_PASSWORD: filemanager
+      # Enable detailed logging for debugging
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Add initialization script if needed
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U filemanager -d filemanager"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 10s
     networks:
       - filez-network
+    command: >
+      postgres 
+      -c log_statement=all
+      -c log_destination=stderr
+      -c logging_collector=off
 
   # S3 Mock (Adobe S3Mock)
   s3mock:
@@ -30,10 +40,15 @@ services:
       - enableRetainFilesOnExit=false
     ports:
       - "9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - filez-network
 
-  # Python AVScan Mock Service (Simpler and more reliable)
+  # Python AVScan Mock Service
   avscan-mock:
     build:
       context: .
@@ -54,30 +69,44 @@ services:
     build: .
     container_name: filez-app
     environment:
+      # R2DBC connection (for application)
       SPRING_R2DBC_URL: r2dbc:postgresql://postgres:5432/filemanager
       SPRING_R2DBC_USERNAME: filemanager
       SPRING_R2DBC_PASSWORD: filemanager
+
+      # Flyway connection (for migrations)
+      SPRING_FLYWAY_URL: jdbc:postgresql://postgres:5432/filemanager
+      SPRING_FLYWAY_USER: filemanager
+      SPRING_FLYWAY_PASSWORD: filemanager
+      SPRING_FLYWAY_ENABLED: true
+      SPRING_FLYWAY_BASELINE_ON_MIGRATE: true
+
+      # Other services
       APP_S3_ENDPOINT: http://s3mock:9090
       APP_S3_BUCKET: filemanager-bucket
       APP_S3_ACCESS_KEY: accessKey
       APP_S3_SECRET_KEY: secretKey
       APP_AV_SCAN_ENDPOINT: http://avscan-mock:8081/scan
       APP_CALLBACK_BASE_URL: http://filez:8080
+
+      # Enable debug logging
+      LOGGING_LEVEL_ORG_FLYWAYDB: DEBUG
+      LOGGING_LEVEL_IO_FILEMANAGER: DEBUG
     ports:
       - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
       s3mock:
-        condition: service_started
+        condition: service_healthy
       avscan-mock:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 40s
+      retries: 5
+      start_period: 60s  # Give more time for migrations to run
     networks:
       - filez-network
 

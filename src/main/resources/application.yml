@@ -2,11 +2,11 @@ spring:
   application:
     name: filez
 
-  webflux:
-    multipart:
-      max-in-memory-size: 1MB
-      max-disk-usage-per-part: 0
+  # Disable Spring Boot's auto Flyway configuration since we're doing it manually
+  flyway:
+    enabled: false
 
+  # R2DBC configuration (for application runtime)
   r2dbc:
     url: r2dbc:postgresql://localhost:5432/filemanager
     username: filemanager
@@ -17,6 +17,11 @@ spring:
       max-idle-time: 30m
       validation-query: SELECT 1
 
+  webflux:
+    multipart:
+      max-in-memory-size: 1MB
+      max-disk-usage-per-part: 0
+
 server:
   port: 8080
   max-http-header-size: 64KB
@@ -26,8 +31,8 @@ server:
 logging:
   level:
     io.filemanager: DEBUG
-    org.springframework.web.reactive: DEBUG
-    org.springframework.r2dbc: DEBUG
+    io.filemanager.filez.config.ManualFlywayMigration: INFO
+    io.filemanager.filez.config.MigrationFileVerifier: INFO
 
 management:
   endpoints:
