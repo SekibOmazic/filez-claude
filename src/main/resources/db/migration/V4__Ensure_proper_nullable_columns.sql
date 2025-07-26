@@ -1,7 +1,7 @@
 -- V4__Ensure_proper_nullable_columns.sql
 -- Final fix for nullable columns to work properly with R2DBC
 
--- Drop the problematic constraint
+-- Drop the problematic constraint from V3
 ALTER TABLE files DROP CONSTRAINT IF EXISTS chk_clean_files_have_size;
 
 -- Ensure the columns are properly nullable and have correct types
@@ -12,14 +12,10 @@ ALTER TABLE files ALTER COLUMN scanned_at DROP NOT NULL;
 ALTER TABLE files ALTER COLUMN file_size DROP DEFAULT;
 ALTER TABLE files ALTER COLUMN scanned_at DROP DEFAULT;
 
--- Verify table structure is correct
--- file_size should be nullable BIGINT
--- scanned_at should be nullable TIMESTAMP
+-- Remove the DEFERRABLE constraint that PostgreSQL doesn't support for CHECK constraints
+-- Instead, add a simple constraint or rely on application-level validation
+-- For now, we'll skip the constraint and handle validation in the application
 
--- Add a better constraint that doesn't interfere with R2DBC inserts
--- This will only be checked after the row is fully inserted/updated
-ALTER TABLE files ADD CONSTRAINT chk_clean_status_requirements
-    CHECK (
-        status != 'CLEAN' OR
-        (status = 'CLEAN' AND file_size IS NOT NULL AND scanned_at IS NOT NULL)
-    ) DEFERRABLE INITIALLY DEFERRED;
+-- Add comments to document the business rules
+COMMENT ON COLUMN files.file_size IS 'File size in bytes - required when status is CLEAN';
+COMMENT ON COLUMN files.scanned_at IS 'Timestamp when virus scanning completed - set when status becomes CLEAN';

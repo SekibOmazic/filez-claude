@@ -35,11 +35,15 @@ def scan_file():
         logger.info(f"Scanning file: {original_filename} (ref: {scan_ref_id})")
         logger.info(f"Will forward to: {target_url}")
 
-        # Read file content
-        file_content = request.get_data()
-        if not file_content:
-            logger.error("No file content received")
-            return "No file content received", 400
+        # Read file content - handle both regular and chunked transfer encoding
+        try:
+            file_content = request.get_data()
+            if not file_content:
+                logger.error("No file content received")
+                return "No file content received", 400
+        except Exception as e:
+            logger.error(f"Error reading request body: {str(e)}")
+            return f"Error reading request body: {str(e)}", 400
 
         file_size = len(file_content)
         logger.info(f"Received file content: {file_size} bytes")
@@ -68,27 +72,35 @@ def scan_file():
             'Content-Length': str(file_size)
         }
 
-        # Stream content to callback URL
-        response = requests.post(
-            target_url,
-            data=file_content,
-            headers=callback_headers,
-            timeout=300,  # 5 minutes timeout
-            stream=True
-        )
+        # Stream content to callback URL with better error handling
+        try:
+            response = requests.post(
+                target_url,
+                data=file_content,
+                headers=callback_headers,
+                timeout=300,  # 5 minutes timeout
+                stream=False  # Don't stream the response, just the request
+            )
 
-        if response.status_code == 200:
-            logger.info(f"Successfully forwarded file to callback: {scan_ref_id}")
-            return "File scanned and forwarded successfully", 200
-        else:
-            logger.error(f"Callback failed with status {response.status_code}: {response.text}")
-            return f"Callback failed with status {response.status_code}", 500
+            if response.status_code == 200:
+                logger.info(f"Successfully forwarded file to callback: {scan_ref_id}")
+                return "File scanned and forwarded successfully", 200
+            else:
+                logger.error(f"Callback failed with status {response.status_code}: {response.text}")
+                return f"Callback failed with status {response.status_code}", 500
 
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Network error forwarding to callback: {str(e)}")
-        return f"Network error: {str(e)}", 500
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Connection error forwarding to callback: {str(e)}")
+            return f"Connection error: {str(e)}", 500
+        except requests.exceptions.Timeout as e:
+            logger.error(f"Timeout forwarding to callback: {str(e)}")
+            return f"Timeout error: {str(e)}", 500
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request error forwarding to callback: {str(e)}")
+            return f"Network error: {str(e)}", 500
+
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
+        logger.error(f"Unexpected error: {str(e)}", exc_info=True)
         return f"Internal error: {str(e)}", 500
 
 @app.route('/health', methods=['GET'])
