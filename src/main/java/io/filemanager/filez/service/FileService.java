@@ -14,7 +14,6 @@ import org.springframework.transaction.annotation.Transactional;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.time.LocalDateTime;
 import java.util.UUID;
 
 @Service
@@ -50,32 +49,34 @@ public class FileService {
         logger.info("Initiating upload for file: {} (id: {}, session: {})",
                 request.filename(), fileId, uploadSessionId);
 
-        // Create file metadata with UPLOADING status - start simple
-        FileEntity fileEntity = new FileEntity();
-        fileEntity.setId(fileId);
-        fileEntity.setFilename(request.filename());
-        fileEntity.setContentType(request.contentType());
-        fileEntity.setFileSize(null); // null initially
-        fileEntity.setS3Key(s3Key);
-        fileEntity.setUploadSessionId(uploadSessionId);
-        fileEntity.setStatus(FileStatus.UPLOADING);
-        fileEntity.setScanReferenceId(scanReferenceId);
-        fileEntity.setCreatedAt(LocalDateTime.now());
-        fileEntity.setUpdatedAt(LocalDateTime.now());
-        fileEntity.setScannedAt(null); // null initially
+        // Use the static factory method for creating new upload
+        FileEntity fileEntity = FileEntity.forNewUpload(
+                fileId,
+                request.filename(),
+                request.contentType(),
+                s3Key,
+                uploadSessionId,
+                scanReferenceId
+        );
 
-        logger.info("Saving entity: {}", fileEntity);
+        logger.info("Created entity for save: {}", fileEntity);
+        logger.info("Entity isNew(): {}", fileEntity.isNew());
+        logger.info("Entity fileSize: {}", fileEntity.fileSize());
+        logger.info("Entity scannedAt: {}", fileEntity.scannedAt());
 
         return fileRepository.save(fileEntity)
+                .doOnError(error -> {
+                    logger.error("Database save failed for entity: {}", fileEntity);
+                    logger.error("Save error details: {}", error.getMessage(), error);
+                })
                 .flatMap(savedEntity -> {
                     logger.info("File metadata saved: {}", savedEntity.getId());
 
-                    // Update status to SCANNING using standard save
-                    savedEntity.setStatus(FileStatus.SCANNING);
-                    savedEntity.setUpdatedAt(LocalDateTime.now());
-                    savedEntity.markAsExisting(); // Mark as existing for update
+                    // Update status to SCANNING
+                    FileEntity updatedEntity = savedEntity.withStatus(FileStatus.SCANNING);
+                    logger.info("Updating entity to SCANNING status: {}", updatedEntity);
 
-                    return fileRepository.save(savedEntity);
+                    return fileRepository.save(updatedEntity);
                 })
                 .flatMap(savedEntity -> {
                     // Send file stream to AVScan service (fire and forget)
@@ -84,10 +85,8 @@ public class FileService {
                             .doOnError(error -> {
                                 logger.error("Failed to send file to AVScan: {}", error.getMessage());
                                 // Update status to FAILED
-                                savedEntity.setStatus(FileStatus.FAILED);
-                                savedEntity.setUpdatedAt(LocalDateTime.now());
-                                savedEntity.markAsExisting();
-                                fileRepository.save(savedEntity).subscribe();
+                                FileEntity failedEntity = savedEntity.withStatus(FileStatus.FAILED);
+                                fileRepository.save(failedEntity).subscribe();
                             })
                             .subscribe();
 
@@ -122,14 +121,12 @@ public class FileService {
                                 // Update file metadata with final size and CLEAN status
                                 logger.info("S3 upload completed for file: {}, size: {} bytes", fileEntity.getId(), fileSize);
 
-                                // Update entity using standard save
-                                fileEntity.setFileSize(fileSize);
-                                fileEntity.setStatus(FileStatus.CLEAN);
-                                fileEntity.setUpdatedAt(LocalDateTime.now());
-                                fileEntity.setScannedAt(LocalDateTime.now());
-                                fileEntity.markAsExisting();
+                                // Use helper methods to create updated entity
+                                FileEntity updatedEntity = fileEntity
+                                        .withFileSize(fileSize)
+                                        .withScanComplete(); // This sets status to CLEAN and scannedAt timestamp
 
-                                return fileRepository.save(fileEntity);
+                                return fileRepository.save(updatedEntity);
                             });
                 })
                 .doOnSuccess(savedEntity -> logger.info("File upload completed: {}", savedEntity.getId()))
