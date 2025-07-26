@@ -7,8 +7,8 @@ RUN apt-get update && \
     apt-get install -y curl && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-RUN pip install flask requests
+# Install Python dependencies with specific versions for better compatibility
+RUN pip install flask==2.3.3 requests==2.31.0 werkzeug==2.3.7
 
 # Copy the mock service script
 COPY avscan-simple-mock.py .
@@ -16,5 +16,9 @@ COPY avscan-simple-mock.py .
 # Expose port
 EXPOSE 8081
 
-# Run the service
-CMD ["python", "avscan-simple-mock.py"]
+# Add healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8081/health || exit 1
+
+# Run the service with better error handling
+CMD ["python", "-u", "avscan-simple-mock.py"]

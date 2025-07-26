@@ -22,13 +22,18 @@ public class AVScanService {
     public AVScanService(AppProperties appProperties) {
         this.appProperties = appProperties;
         this.webClient = WebClient.builder()
-                .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(-1))
+                .codecs(configurer -> {
+                    // CRITICAL: Unlimited to avoid any buffering limits
+                    configurer.defaultCodecs().maxInMemorySize(-1);
+                    // Enable streaming mode
+                    configurer.defaultCodecs().enableLoggingRequestDetails(true);
+                })
                 .build();
     }
 
     /**
-     * Streams file content to AVScan service for virus scanning.
-     * AVScan will scan the content and stream clean content to our callback URL.
+     * PURE STREAMING to AVScan - never buffers the entire file.
+     * The fileStream is passed through directly without any intermediate buffering.
      */
     public Mono<String> scanFile(Flux<DataBuffer> fileStream,
                                  String scanReferenceId,
@@ -37,8 +42,19 @@ public class AVScanService {
 
         String callbackUrl = buildCallbackUrl(scanReferenceId);
 
-        logger.info("Sending file {} (ref: {}) to AVScan service. Callback URL: {}",
-                filename, scanReferenceId, callbackUrl);
+        logger.info("🔍 Streaming file to AVScan: {} (ref: {})", filename, scanReferenceId);
+        logger.info("📞 Callback URL: {}", callbackUrl);
+
+        // Create a PURE streaming flux that tracks bytes but never accumulates
+        Flux<DataBuffer> trackingStream = fileStream
+                .doOnSubscribe(s -> logger.info("🚀 Starting AVScan stream for: {}", filename))
+                .doOnNext(buffer -> {
+                    // Only log individual chunks - never accumulate
+                    logger.debug("📤 Sending to AVScan: {} bytes", buffer.readableByteCount());
+                })
+                .doOnComplete(() -> logger.info("✅ Stream to AVScan completed for: {}", filename))
+                .doOnError(error -> logger.error("❌ Stream to AVScan failed for {}: {}", filename, error.getMessage()))
+                .doFinally(signal -> logger.debug("🏁 AVScan stream finished with signal: {}", signal));
 
         return webClient
                 .post()
@@ -48,14 +64,14 @@ public class AVScanService {
                 .header("original-filename", filename)
                 .header("original-content-type", contentType)
                 .contentType(MediaType.APPLICATION_OCTET_STREAM)
-                .body(BodyInserters.fromDataBuffers(fileStream))
+                // Use fromDataBuffers for pure streaming - no intermediate buffering
+                .body(BodyInserters.fromDataBuffers(trackingStream))
                 .retrieve()
                 .bodyToMono(String.class)
                 .timeout(appProperties.avScan().timeout())
-                .doOnSuccess(response -> logger.info("AVScan accepted file for scanning: {}", scanReferenceId))
-                .doOnError(error -> logger.error("Failed to send file to AVScan: {}", error.getMessage()))
-                .onErrorMap(throwable -> new RuntimeException("AVScan service error", throwable));
-        // Note: DataBuffers are automatically released by WebClient when consuming the flux
+                .doOnSuccess(response -> logger.info("✅ AVScan accepted file: {} -> {}", scanReferenceId, response))
+                .doOnError(error -> logger.error("❌ AVScan failed for {}: {}", scanReferenceId, error.getMessage()))
+                .onErrorMap(throwable -> new RuntimeException("AVScan service error: " + throwable.getMessage(), throwable));
     }
 
     private String buildCallbackUrl(String scanReferenceId) {

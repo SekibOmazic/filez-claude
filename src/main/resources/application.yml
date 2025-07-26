@@ -19,8 +19,11 @@ spring:
 
   webflux:
     multipart:
-      max-in-memory-size: 1MB
-      max-disk-usage-per-part: 0
+      # CRITICAL: Keep everything in memory to avoid disk buffering
+      max-in-memory-size: 8KB  # Very small - just for multipart headers
+      max-disk-usage-per-part: 0  # NO DISK USAGE - pure streaming
+      # Enable streaming to process parts as they arrive
+      streaming: true
 
 server:
   port: 8080

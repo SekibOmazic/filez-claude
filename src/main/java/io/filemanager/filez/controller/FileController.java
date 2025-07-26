@@ -3,8 +3,6 @@ package io.filemanager.filez.controller;
 import io.filemanager.filez.dto.FileStatusResponse;
 import io.filemanager.filez.dto.UploadRequest;
 import io.filemanager.filez.dto.UploadResponse;
-import io.filemanager.filez.model.FileEntity;
-import io.filemanager.filez.repository.FileRepository;
 import io.filemanager.filez.service.FileService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -14,7 +12,6 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.util.unit.DataSize;
 import org.springframework.web.bind.annotation.*;
@@ -23,11 +20,10 @@ import reactor.core.publisher.Mono;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 @RestController
 @RequestMapping("/api/v1/files")
@@ -35,313 +31,132 @@ public class FileController {
 
     private static final Logger logger = LoggerFactory.getLogger(FileController.class);
 
-    // Support really large files - configurable via properties
-    private static final long MAX_FILE_SIZE = DataSize.ofTerabytes(1).toBytes(); // 1TB limit!
-    private static final int CHUNK_SIZE = 8192; // 8KB chunks for optimal streaming
+    private static final long MAX_FILE_SIZE = DataSize.ofTerabytes(1).toBytes();
 
     private final FileService fileService;
 
-    private final FileRepository fileRepository;
-
-    public FileController(FileService fileService, FileRepository fileRepository) {
+    public FileController(FileService fileService) {
         this.fileService = fileService;
-        this.fileRepository = fileRepository;
-    }
-
-    // Add this as a simple test method in your FileController for debugging
-    @GetMapping("/test-entity")
-    public Mono<ResponseEntity<Map<String, Object>>> testEntityCreation() {
-        logger.info("=== TESTING ENTITY CREATION ===");
-
-        UUID fileId = UUID.randomUUID();
-        UUID uploadSessionId = UUID.randomUUID();
-        String scanReferenceId = UUID.randomUUID().toString();
-
-        FileEntity entity = FileEntity.forNewUpload(
-                fileId,
-                "test-file.txt",
-                "text/plain",
-                "files/test/test-file.txt",
-                uploadSessionId,
-                scanReferenceId
-        );
-
-        logger.info("Created test entity: {}", entity);
-        logger.info("Entity isNew(): {}", entity.isNew());
-        logger.info("All fields:");
-        logger.info("  id: {}", entity.getId());
-        logger.info("  filename: {}", entity.filename());
-        logger.info("  contentType: {}", entity.contentType());
-        logger.info("  fileSize: {}", entity.fileSize());
-        logger.info("  s3Key: {}", entity.s3Key());
-        logger.info("  uploadSessionId: {}", entity.uploadSessionId());
-        logger.info("  status: {}", entity.status());
-        logger.info("  scanReferenceId: {}", entity.scanReferenceId());
-        logger.info("  createdAt: {}", entity.createdAt());
-        logger.info("  updatedAt: {}", entity.updatedAt());
-        logger.info("  scannedAt: {}", entity.scannedAt());
-
-        // Try to save it
-        return fileRepository.save(entity)
-                .map(saved -> {
-                    Map<String, Object> result = new HashMap<>();
-                    result.put("success", true);
-                    result.put("entityId", saved.getId());
-                    result.put("isNew", saved.isNew());
-                    return ResponseEntity.ok(result);
-                })
-                .onErrorResume(error -> {
-                    logger.error("Save test failed: {}", error.getMessage(), error);
-                    Map<String, Object> result = new HashMap<>();
-                    result.put("success", false);
-                    result.put("error", error.getMessage());
-                    return Mono.just(ResponseEntity.badRequest().body(result));
-                });
     }
 
     /**
-     * Enhanced upload endpoint that handles:
-     * 1. Really large files (TB scale)
-     * 2. Unknown file sizes (no Content-Length header)
-     * 3. Progressive size validation during streaming
-     * 4. Streaming rate monitoring
+     * RAW STREAMING upload - ZERO buffering, works with any file size.
+     * This completely bypasses Spring's multipart parsing to avoid disk buffering.
+     *
+     * Usage from curl:
+     * curl -X POST http://localhost:8080/api/v1/files/upload \
+     *   -H "Content-Type: application/octet-stream" \
+     *   -H "X-Filename: myfile.pdf" \
+     *   -H "X-Content-Type: application/pdf" \
+     *   --data-binary @myfile.pdf
      */
-    @PostMapping(value = "/upload1", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public Mono<ResponseEntity<UploadResponse>> uploadFile1(
-            @RequestPart("file") Mono<FilePart> filePartMono) {
+    @PostMapping(value = "/upload", consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+    public Mono<ResponseEntity<UploadResponse>> uploadFile(
+            @RequestHeader("X-Filename") String filename,
+            @RequestHeader(value = "X-Content-Type", defaultValue = "application/octet-stream") String contentType,
+            ServerHttpRequest request) {
 
-        logger.info("Received file upload request");
+        logger.info("📤 ZERO-BUFFER upload: {} ({})", filename, contentType);
 
-        return filePartMono
-                .flatMap(filePart -> {
-                    // Validate file part
-                    if (filePart.filename() == null || filePart.filename().isEmpty()) {
-                        return Mono.error(new RuntimeException("Filename is required"));
-                    }
+        if (filename == null || filename.trim().isEmpty()) {
+            return Mono.just(ResponseEntity.badRequest()
+                    .header("X-Error", "X-Filename header is required")
+                    .build());
+        }
 
-                    // Extract metadata from FilePart (no need for separate UploadRequest)
-                    String filename = filePart.filename();
-                    String contentType = determineContentType(filePart);
+        UploadRequest uploadRequest = new UploadRequest(filename.trim(), contentType);
 
-                    // Create upload request from FilePart data
-                    UploadRequest uploadRequest = new UploadRequest(filename, contentType);
+        // Get the raw request body - PURE STREAMING, NO BUFFERING
+        Flux<DataBuffer> zeroBufferStream = request.getBody()
+                .doOnSubscribe(s -> logger.info("🚀 Zero-buffer stream started: {}", filename))
+                .doOnNext(buffer -> logger.debug("📦 Streaming chunk: {} bytes", buffer.readableByteCount()))
+                .doOnComplete(() -> logger.info("✅ Zero-buffer stream completed: {}", filename))
+                .doOnError(error -> logger.error("❌ Zero-buffer stream error: {}", error.getMessage()));
 
-                    logger.info("Processing file upload: {} ({})", filename, contentType);
-
-                    // Get Content-Length if available
-                    Long declaredSize = getContentLength(filePart);
-                    logger.info("File upload - declared size: {} bytes ({})",
-                            declaredSize, declaredSize != null ? formatBytes(declaredSize) : "unknown");
-
-                    // Enhanced streaming with size tracking and validation
-                    AtomicLong totalBytes = new AtomicLong(0);
-                    AtomicLong lastLoggedSize = new AtomicLong(0);
-                    long startTime = System.currentTimeMillis();
-
-                    Flux<DataBuffer> enhancedFileStream = filePart.content()
-                            .doOnSubscribe(subscription -> logger.info("Starting file stream for: {}", filename))
-                            .doOnNext(dataBuffer -> {
-                                long currentTotal = totalBytes.addAndGet(dataBuffer.readableByteCount());
-
-                                // Progressive size validation
-                                if (currentTotal > MAX_FILE_SIZE) {
-                                    throw new RuntimeException(String.format(
-                                            "File size exceeds maximum allowed size of %s (current: %s)",
-                                            formatBytes(MAX_FILE_SIZE), formatBytes(currentTotal)));
-                                }
-
-                                // Log progress every 100MB for large files
-                                long lastLogged = lastLoggedSize.get();
-                                if (currentTotal - lastLogged > DataSize.ofMegabytes(100).toBytes()) {
-                                    if (lastLoggedSize.compareAndSet(lastLogged, currentTotal)) {
-                                        long elapsed = System.currentTimeMillis() - startTime;
-                                        double mbPerSecond = (currentTotal / 1024.0 / 1024.0) / (elapsed / 1000.0);
-                                        logger.info("Upload progress - {}: {} ({} MB/s)",
-                                                filename, formatBytes(currentTotal), String.format("%.2f", mbPerSecond));
-                                    }
-                                }
-                            })
-                            .doOnComplete(() -> {
-                                long finalSize = totalBytes.get();
-                                long elapsed = System.currentTimeMillis() - startTime;
-                                double mbPerSecond = (finalSize / 1024.0 / 1024.0) / (elapsed / 1000.0);
-                                logger.info("Upload stream completed - {}: {} in {}ms ({} MB/s)",
-                                        filename, formatBytes(finalSize), elapsed, String.format("%.2f", mbPerSecond));
-                            })
-                            .doOnError(error -> logger.error("Upload stream error for {}: {}",
-                                    filename, error.getMessage()))
-                            // Add timeout for really large files (24 hours)
-                            .timeout(Duration.ofHours(24), Mono.error(new RuntimeException("Upload timeout after 24 hours")));
-
-                    return fileService.initiateUpload(uploadRequest, enhancedFileStream);
-                })
+        return fileService.initiateUpload(uploadRequest, zeroBufferStream)
                 .map(uploadResponse -> ResponseEntity.status(HttpStatus.ACCEPTED).body(uploadResponse))
                 .onErrorResume(throwable -> {
-                    logger.error("Upload failed: {}", throwable.getMessage());
-
-                    if (throwable.getMessage().contains("File size exceeds")) {
-                        return Mono.just(ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
-                                .header("X-Error-Details", throwable.getMessage())
-                                .build());
-                    }
-
-                    if (throwable.getMessage().contains("Upload timeout")) {
-                        return Mono.just(ResponseEntity.status(HttpStatus.REQUEST_TIMEOUT)
-                                .header("X-Error-Details", "Upload timeout - file may be too large")
-                                .build());
-                    }
-
+                    logger.error("Zero-buffer upload failed: {}", throwable.getMessage());
                     return Mono.just(ResponseEntity.status(HttpStatus.BAD_REQUEST)
                             .header("X-Error-Details", throwable.getMessage())
                             .build());
                 });
     }
 
+    /**
+     * STREAMING MULTIPART upload that manually parses multipart without disk buffering.
+     * This reads the multipart stream manually to extract filename and content.
+     */
+    @PostMapping(value = "/upload-multipart", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Mono<ResponseEntity<UploadResponse>> uploadMultipartFile(ServerHttpRequest request) {
 
-    @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public Mono<ResponseEntity<UploadResponse>> uploadFile(
-            @RequestHeader("Content-Type") String contentTypeHeader,
-            @RequestBody Flux<DataBuffer> bodyStream) {
+        logger.info("📤 Manual multipart parsing upload");
 
-        logger.info("Received file upload request");
+        String contentTypeHeader = request.getHeaders().getFirst("Content-Type");
+        if (contentTypeHeader == null || !contentTypeHeader.contains("boundary=")) {
+            return Mono.just(ResponseEntity.badRequest()
+                    .header("X-Error", "Missing multipart boundary")
+                    .build());
+        }
 
         // Extract boundary
-        if (!contentTypeHeader.contains("boundary=")) {
-            return Mono.just(ResponseEntity.badRequest().build());
-        }
+        String boundary = extractBoundary(contentTypeHeader);
+        logger.info("🔍 Multipart boundary: {}", boundary);
 
-        // For now, assume the file data starts after headers
-        // Skip multipart headers and extract just the file content
-        AtomicBoolean foundFileStart = new AtomicBoolean(false);
+        // Parse multipart stream manually without buffering
+        return parseMultipartStream(request.getBody(), boundary)
+                .flatMap(uploadData -> {
+                    logger.info("📝 Parsed multipart: filename={}, contentType={}, dataSize={}",
+                            uploadData.filename, uploadData.contentType, uploadData.dataSize);
 
-        Flux<DataBuffer> fileContentStream = bodyStream
-                .skipWhile(buffer -> {
-                    if (foundFileStart.get()) return false;
+                    UploadRequest uploadRequest = new UploadRequest(uploadData.filename, uploadData.contentType);
 
-                    String content = buffer.toString(StandardCharsets.UTF_8);
-                    if (content.contains("Content-Type:") || content.contains("filename=")) {
-                        // Found file headers, next buffer should be content
-                        foundFileStart.set(true);
-                        DataBufferUtils.release(buffer);
-                        return true;
-                    }
-                    DataBufferUtils.release(buffer);
-                    return true;
+                    return fileService.initiateUpload(uploadRequest, uploadData.fileStream);
                 })
-                .takeWhile(buffer -> {
-                    // Stop at boundary end
-                    String content = buffer.toString(StandardCharsets.UTF_8);
-                    return !content.contains("------");
-                });
-
-        // Create a dummy upload request (you'd parse this from headers)
-        UploadRequest uploadRequest = new UploadRequest("streaming-upload.bin", "application/octet-stream");
-
-        return fileService.initiateUpload(uploadRequest, fileContentStream)
                 .map(uploadResponse -> ResponseEntity.status(HttpStatus.ACCEPTED).body(uploadResponse))
                 .onErrorResume(throwable -> {
-                    logger.error("Upload failed: {}", throwable.getMessage());
-
-                    if (throwable.getMessage().contains("File size exceeds")) {
-                        return Mono.just(ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).build());
-                    }
-
-                    if (throwable.getMessage().contains("Upload timeout")) {
-                        return Mono.just(ResponseEntity.status(HttpStatus.REQUEST_TIMEOUT).build());
-                    }
-
-                    return Mono.just(ResponseEntity.status(HttpStatus.BAD_REQUEST).build());
+                    logger.error("Manual multipart upload failed: {}", throwable.getMessage());
+                    return Mono.just(ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                            .header("X-Error-Details", throwable.getMessage())
+                            .build());
                 });
     }
-
-    @PostMapping(value = "/upload-debug", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public Mono<ResponseEntity<Map<String, Object>>> uploadFileDebug(ServerHttpRequest request) {
-
-        logger.info("=== UPLOAD DEBUG ===");
-        logger.info("Method: {}", request.getMethod());
-        logger.info("Headers: {}", request.getHeaders());
-        logger.info("Content-Type: {}", request.getHeaders().getContentType());
-
-        MediaType contentType = request.getHeaders().getContentType();
-        if (contentType == null || !contentType.includes(MediaType.MULTIPART_FORM_DATA)) {
-            Map<String, Object> errorResponse = Map.of(
-                    "error", "Expected multipart/form-data",
-                    "received", String.valueOf(contentType)
-            );
-            return Mono.just(ResponseEntity.badRequest().body(errorResponse));
-        }
-
-        AtomicLong totalBytes = new AtomicLong(0);
-
-        return request.getBody()
-                .doOnNext(buffer -> {
-                    long bytes = buffer.readableByteCount();
-                    totalBytes.addAndGet(bytes);
-                    logger.info("Received {} bytes (total: {})", bytes, totalBytes.get());
-                    DataBufferUtils.release(buffer); // Always release!
-                })
-                .doOnComplete(() -> logger.info("Stream completed: {} total bytes", totalBytes.get()))
-                .then(Mono.fromCallable(() -> {
-                    Map<String, Object> successResponse = new HashMap<>();
-                    successResponse.put("status", "success");
-                    successResponse.put("totalBytes", totalBytes.get());
-                    return ResponseEntity.ok(successResponse);
-                }))
-                .onErrorResume(error -> {
-                    logger.error("Upload error: {}", error.getMessage(), error);
-                    Map<String, Object> errorResponse = Map.of("error", "Processing failed");
-                    return Mono.just(ResponseEntity.badRequest().body(errorResponse));
-                });
-    }
-
 
     /**
-     * Enhanced callback endpoint that can handle unknown file sizes
+     * Callback endpoint for AVScan service - pure streaming
      */
     @PostMapping("/upload-scanned")
     public Mono<ResponseEntity<String>> handleScannedUpload(
             @RequestParam("ref") String scanReferenceId,
             @RequestBody Flux<DataBuffer> cleanFileStream) {
 
-        logger.info("Received scanned file callback for reference: {}", scanReferenceId);
+        logger.info("📥 Scanned file callback: {}", scanReferenceId);
 
-        // Add size tracking for the clean file stream too
-        AtomicLong cleanFileBytes = new AtomicLong(0);
+        Flux<DataBuffer> trackedStream = cleanFileStream
+                .doOnNext(buffer -> logger.debug("📦 Clean chunk: {} bytes", buffer.readableByteCount()))
+                .doOnComplete(() -> logger.info("✅ Clean stream completed: {}", scanReferenceId));
 
-        Flux<DataBuffer> trackedCleanStream = cleanFileStream
-                .doOnNext(dataBuffer -> cleanFileBytes.addAndGet(dataBuffer.readableByteCount()))
-                .doOnComplete(() -> logger.info("Clean file stream completed - reference {}: {} bytes",
-                        scanReferenceId, formatBytes(cleanFileBytes.get())))
-                .timeout(Duration.ofHours(24)); // Same timeout as upload
-
-        return fileService.handleScannedFile(scanReferenceId, trackedCleanStream)
-                .then(Mono.just(ResponseEntity.ok("Upload completed - " + formatBytes(cleanFileBytes.get()))))
+        return fileService.handleScannedFile(scanReferenceId, trackedStream)
+                .then(Mono.just(ResponseEntity.ok("Scanned file processed")))
                 .onErrorReturn(ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                        .body("Upload failed"));
+                        .body("Failed to process scanned file"));
     }
 
     /**
-     * Get file status endpoint with enhanced progress info
+     * Get file status
      */
     @GetMapping("/{fileId}/status")
     public Mono<ResponseEntity<FileStatusResponse>> getFileStatus(@PathVariable UUID fileId) {
-        logger.info("Getting status for file: {}", fileId);
-
         return fileService.getFileStatus(fileId)
                 .map(ResponseEntity::ok)
                 .onErrorReturn(ResponseEntity.notFound().build());
     }
 
     /**
-     * Enhanced download endpoint with resume support preparation
+     * Download file - pure streaming
      */
     @GetMapping("/{fileId}/download")
-    public Mono<ResponseEntity<Flux<DataBuffer>>> downloadFile(
-            @PathVariable UUID fileId,
-            @RequestHeader(value = "Range", required = false) String rangeHeader) {
-
-        logger.info("Download request for file: {} (Range: {})", fileId, rangeHeader);
-
+    public Mono<ResponseEntity<Flux<DataBuffer>>> downloadFile(@PathVariable UUID fileId) {
         return fileService.getFileForDownload(fileId)
                 .map(fileEntity -> {
                     Flux<DataBuffer> fileStream = fileService.streamFileContent(fileEntity.s3Key());
@@ -352,51 +167,122 @@ public class FileController {
 
                     if (fileEntity.fileSize() != null) {
                         headers.setContentLength(fileEntity.fileSize());
-                        // Add headers for large file handling
-                        headers.set("Accept-Ranges", "bytes");
-                        headers.set("X-File-Size", formatBytes(fileEntity.fileSize()));
                     }
 
-                    // For really large files, add streaming hints
-                    if (fileEntity.fileSize() != null && fileEntity.fileSize() > DataSize.ofGigabytes(1).toBytes()) {
-                        headers.set("X-Large-File", "true");
-                        headers.set("X-Recommended-Chunk-Size", String.valueOf(CHUNK_SIZE));
-                    }
-
-                    return ResponseEntity.ok()
-                            .headers(headers)
-                            .body(fileStream);
+                    return ResponseEntity.ok().headers(headers).body(fileStream);
                 })
                 .onErrorReturn(ResponseEntity.notFound().build());
     }
 
-    /**
-     * Utility method to extract Content-Length from FilePart
-     * Returns null if not available (common for large files)
-     */
-    private Long getContentLength(FilePart filePart) {
-        try {
-            HttpHeaders headers = filePart.headers();
-            return headers.getContentLength() > 0 ? headers.getContentLength() : null;
-        } catch (Exception e) {
-            return null;
+    // --- Utility Methods ---
+
+    private String extractBoundary(String contentType) {
+        String[] parts = contentType.split(";");
+        for (String part : parts) {
+            part = part.trim();
+            if (part.startsWith("boundary=")) {
+                return part.substring("boundary=".length());
+            }
         }
+        throw new RuntimeException("No boundary found in Content-Type");
     }
 
-    /**
-     * Human-readable byte formatting
-     */
-    private String formatBytes(long bytes) {
-        if (bytes < 1024) return bytes + " B";
-        if (bytes < 1024 * 1024) return String.format("%.2f KB", bytes / 1024.0);
-        if (bytes < 1024 * 1024 * 1024) return String.format("%.2f MB", bytes / (1024.0 * 1024.0));
-        if (bytes < 1024L * 1024 * 1024 * 1024) return String.format("%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
-        return String.format("%.2f TB", bytes / (1024.0 * 1024.0 * 1024.0 * 1024.0));
+    private Mono<MultipartUploadData> parseMultipartStream(Flux<DataBuffer> dataStream, String boundary) {
+        AtomicReference<String> filename = new AtomicReference<>();
+        AtomicReference<String> contentType = new AtomicReference<>("application/octet-stream");
+        AtomicBoolean foundFileStart = new AtomicBoolean(false);
+        AtomicLong dataSize = new AtomicLong(0);
+
+        String boundaryMarker = "--" + boundary;
+
+        // Simple multipart parser that extracts file content without buffering
+        Flux<DataBuffer> fileContentStream = dataStream
+                .doOnNext(buffer -> {
+                    if (!foundFileStart.get()) {
+                        // Parse headers to extract filename and content-type
+                        String content = extractStringFromBuffer(buffer);
+
+                        if (content.contains("filename=")) {
+                            String extractedFilename = extractFilename(content);
+                            if (extractedFilename != null) {
+                                filename.set(extractedFilename);
+                                logger.debug("📝 Extracted filename: {}", extractedFilename);
+                            }
+                        }
+
+                        if (content.contains("Content-Type:")) {
+                            String extractedContentType = extractContentType(content);
+                            if (extractedContentType != null) {
+                                contentType.set(extractedContentType);
+                                logger.debug("📝 Extracted content-type: {}", extractedContentType);
+                            }
+                        }
+
+                        // Look for end of headers (double CRLF)
+                        if (content.contains("\r\n\r\n")) {
+                            foundFileStart.set(true);
+                            logger.debug("📍 Found start of file content");
+                        }
+                    } else {
+                        dataSize.addAndGet(buffer.readableByteCount());
+                    }
+                })
+                .skipWhile(buffer -> !foundFileStart.get())
+                .takeWhile(buffer -> {
+                    // Stop when we hit the end boundary
+                    String content = extractStringFromBuffer(buffer);
+                    return !content.contains(boundaryMarker);
+                });
+
+        return Mono.just(new MultipartUploadData(
+                filename.get() != null ? filename.get() : "unknown",
+                contentType.get(),
+                fileContentStream,
+                dataSize.get()
+        ));
     }
 
-    private String determineContentType(FilePart filePart) {
-        HttpHeaders headers = filePart.headers();
-        MediaType contentType = headers.getContentType();
-        return contentType != null ? contentType.toString() : MediaType.APPLICATION_OCTET_STREAM_VALUE;
+    private String extractStringFromBuffer(DataBuffer buffer) {
+        byte[] bytes = new byte[Math.min(buffer.readableByteCount(), 1024)]; // Limit to prevent huge header parsing
+        buffer.read(bytes, 0, bytes.length);
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    private String extractFilename(String content) {
+        int start = content.indexOf("filename=\"");
+        if (start >= 0) {
+            start += "filename=\"".length();
+            int end = content.indexOf("\"", start);
+            if (end >= 0) {
+                return content.substring(start, end);
+            }
+        }
+        return null;
+    }
+
+    private String extractContentType(String content) {
+        int start = content.indexOf("Content-Type:");
+        if (start >= 0) {
+            start += "Content-Type:".length();
+            int end = content.indexOf("\r\n", start);
+            if (end >= 0) {
+                return content.substring(start, end).trim();
+            }
+        }
+        return null;
+    }
+
+    private static class MultipartUploadData {
+        final String filename;
+        final String contentType;
+        final Flux<DataBuffer> fileStream;
+        final long dataSize;
+
+        MultipartUploadData(String filename, String contentType, Flux<DataBuffer> fileStream, long dataSize) {
+            this.filename = filename;
+            this.contentType = contentType;
+            this.fileStream = fileStream;
+            this.dataSize = dataSize;
+        }
     }
 }
