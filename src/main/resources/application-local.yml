@@ -15,8 +15,13 @@ logging:
   level:
     io.filemanager: DEBUG
     org.springframework.web.reactive: INFO
-    org.springframework.r2dbc: INFO
+    #org.springframework.r2dbc: INFO
     org.testcontainers: INFO
+    org.springframework.http.codec.multipart: DEBUG
+    org.springframework.web.reactive.function: DEBUG
+    org.springframework.r2dbc: TRACE
+    io.r2dbc.postgresql.QUERY: DEBUG
+    io.r2dbc.postgresql.PARAM: DEBUG
 
 # Single app configuration section
 app:

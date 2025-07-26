@@ -43,7 +43,7 @@ public class CleanupService {
         fileRepository.findByStatusAndCreatedAtBefore(FileStatus.UPLOADING, cutoffTime)
                 .flatMap(fileEntity -> {
                     logger.warn("Marking stuck UPLOADING file as FAILED: {} (created: {})",
-                            fileEntity.id(), fileEntity.createdAt());
+                            fileEntity.getId(), fileEntity.createdAt());
                     return fileRepository.save(fileEntity.withStatus(FileStatus.FAILED));
                 })
                 .count()
@@ -52,7 +52,7 @@ public class CleanupService {
                     return fileRepository.findByStatusAndCreatedAtBefore(FileStatus.SCANNING, cutoffTime)
                             .flatMap(fileEntity -> {
                                 logger.warn("Marking stuck SCANNING file as FAILED: {} (created: {})",
-                                        fileEntity.id(), fileEntity.createdAt());
+                                        fileEntity.getId(), fileEntity.createdAt());
                                 return fileRepository.save(fileEntity.withStatus(FileStatus.FAILED));
                             })
                             .count()

@@ -8,18 +8,24 @@ import jakarta.validation.Valid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.multipart.FilePart;
+import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.util.unit.DataSize;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 @RestController
@@ -45,8 +51,8 @@ public class FileController {
      * 3. Progressive size validation during streaming
      * 4. Streaming rate monitoring
      */
-    @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public Mono<ResponseEntity<UploadResponse>> uploadFile(
+    @PostMapping(value = "/upload1", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Mono<ResponseEntity<UploadResponse>> uploadFile1(
             @RequestPart("file") Mono<FilePart> filePartMono) {
 
         logger.info("Received file upload request");
@@ -135,6 +141,104 @@ public class FileController {
                             .build());
                 });
     }
+
+
+    @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Mono<ResponseEntity<UploadResponse>> uploadFile(
+            @RequestHeader("Content-Type") String contentTypeHeader,
+            @RequestBody Flux<DataBuffer> bodyStream) {
+
+        logger.info("Received file upload request");
+
+        // Extract boundary
+        if (!contentTypeHeader.contains("boundary=")) {
+            return Mono.just(ResponseEntity.badRequest().build());
+        }
+
+        // For now, assume the file data starts after headers
+        // Skip multipart headers and extract just the file content
+        AtomicBoolean foundFileStart = new AtomicBoolean(false);
+
+        Flux<DataBuffer> fileContentStream = bodyStream
+                .skipWhile(buffer -> {
+                    if (foundFileStart.get()) return false;
+
+                    String content = buffer.toString(StandardCharsets.UTF_8);
+                    if (content.contains("Content-Type:") || content.contains("filename=")) {
+                        // Found file headers, next buffer should be content
+                        foundFileStart.set(true);
+                        DataBufferUtils.release(buffer);
+                        return true;
+                    }
+                    DataBufferUtils.release(buffer);
+                    return true;
+                })
+                .takeWhile(buffer -> {
+                    // Stop at boundary end
+                    String content = buffer.toString(StandardCharsets.UTF_8);
+                    return !content.contains("------");
+                });
+
+        // Create a dummy upload request (you'd parse this from headers)
+        UploadRequest uploadRequest = new UploadRequest("streaming-upload.bin", "application/octet-stream");
+
+        return fileService.initiateUpload(uploadRequest, fileContentStream)
+                .map(uploadResponse -> ResponseEntity.status(HttpStatus.ACCEPTED).body(uploadResponse))
+                .onErrorResume(throwable -> {
+                    logger.error("Upload failed: {}", throwable.getMessage());
+
+                    if (throwable.getMessage().contains("File size exceeds")) {
+                        return Mono.just(ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).build());
+                    }
+
+                    if (throwable.getMessage().contains("Upload timeout")) {
+                        return Mono.just(ResponseEntity.status(HttpStatus.REQUEST_TIMEOUT).build());
+                    }
+
+                    return Mono.just(ResponseEntity.status(HttpStatus.BAD_REQUEST).build());
+                });
+    }
+
+    @PostMapping(value = "/upload-debug", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Mono<ResponseEntity<Map<String, Object>>> uploadFileDebug(ServerHttpRequest request) {
+
+        logger.info("=== UPLOAD DEBUG ===");
+        logger.info("Method: {}", request.getMethod());
+        logger.info("Headers: {}", request.getHeaders());
+        logger.info("Content-Type: {}", request.getHeaders().getContentType());
+
+        MediaType contentType = request.getHeaders().getContentType();
+        if (contentType == null || !contentType.includes(MediaType.MULTIPART_FORM_DATA)) {
+            Map<String, Object> errorResponse = Map.of(
+                    "error", "Expected multipart/form-data",
+                    "received", String.valueOf(contentType)
+            );
+            return Mono.just(ResponseEntity.badRequest().body(errorResponse));
+        }
+
+        AtomicLong totalBytes = new AtomicLong(0);
+
+        return request.getBody()
+                .doOnNext(buffer -> {
+                    long bytes = buffer.readableByteCount();
+                    totalBytes.addAndGet(bytes);
+                    logger.info("Received {} bytes (total: {})", bytes, totalBytes.get());
+                    DataBufferUtils.release(buffer); // Always release!
+                })
+                .doOnComplete(() -> logger.info("Stream completed: {} total bytes", totalBytes.get()))
+                .then(Mono.fromCallable(() -> {
+                    Map<String, Object> successResponse = new HashMap<>();
+                    successResponse.put("status", "success");
+                    successResponse.put("totalBytes", totalBytes.get());
+                    return ResponseEntity.ok(successResponse);
+                }))
+                .onErrorResume(error -> {
+                    logger.error("Upload error: {}", error.getMessage(), error);
+                    Map<String, Object> errorResponse = Map.of("error", "Processing failed");
+                    return Mono.just(ResponseEntity.badRequest().body(errorResponse));
+                });
+    }
+
 
     /**
      * Enhanced callback endpoint that can handle unknown file sizes

@@ -50,27 +50,32 @@ public class FileService {
         logger.info("Initiating upload for file: {} (id: {}, session: {})",
                 request.filename(), fileId, uploadSessionId);
 
-        // Create file metadata with UPLOADING status
-        FileEntity fileEntity = new FileEntity(
-                fileId,
-                request.filename(),
-                request.contentType(),
-                null, // File size will be updated after successful scan
-                s3Key,
-                uploadSessionId,
-                FileStatus.UPLOADING,
-                scanReferenceId,
-                LocalDateTime.now(),
-                LocalDateTime.now(),
-                null
-        );
+        // Create file metadata with UPLOADING status - start simple
+        FileEntity fileEntity = new FileEntity();
+        fileEntity.setId(fileId);
+        fileEntity.setFilename(request.filename());
+        fileEntity.setContentType(request.contentType());
+        fileEntity.setFileSize(null); // null initially
+        fileEntity.setS3Key(s3Key);
+        fileEntity.setUploadSessionId(uploadSessionId);
+        fileEntity.setStatus(FileStatus.UPLOADING);
+        fileEntity.setScanReferenceId(scanReferenceId);
+        fileEntity.setCreatedAt(LocalDateTime.now());
+        fileEntity.setUpdatedAt(LocalDateTime.now());
+        fileEntity.setScannedAt(null); // null initially
+
+        logger.info("Saving entity: {}", fileEntity);
 
         return fileRepository.save(fileEntity)
                 .flatMap(savedEntity -> {
-                    logger.info("File metadata saved: {}", savedEntity.id());
+                    logger.info("File metadata saved: {}", savedEntity.getId());
 
-                    // Update status to SCANNING
-                    return fileRepository.save(savedEntity.withStatus(FileStatus.SCANNING));
+                    // Update status to SCANNING using standard save
+                    savedEntity.setStatus(FileStatus.SCANNING);
+                    savedEntity.setUpdatedAt(LocalDateTime.now());
+                    savedEntity.markAsExisting(); // Mark as existing for update
+
+                    return fileRepository.save(savedEntity);
                 })
                 .flatMap(savedEntity -> {
                     // Send file stream to AVScan service (fire and forget)
@@ -79,18 +84,20 @@ public class FileService {
                             .doOnError(error -> {
                                 logger.error("Failed to send file to AVScan: {}", error.getMessage());
                                 // Update status to FAILED
-                                fileRepository.save(savedEntity.withStatus(FileStatus.FAILED))
-                                        .subscribe();
+                                savedEntity.setStatus(FileStatus.FAILED);
+                                savedEntity.setUpdatedAt(LocalDateTime.now());
+                                savedEntity.markAsExisting();
+                                fileRepository.save(savedEntity).subscribe();
                             })
                             .subscribe();
 
                     // Return response immediately
                     return Mono.just(new UploadResponse(
                             uploadSessionId,
-                            savedEntity.id(),
+                            savedEntity.getId(),
                             savedEntity.filename(),
                             savedEntity.status(),
-                            "/api/v1/files/" + savedEntity.id() + "/status",
+                            "/api/v1/files/" + savedEntity.getId() + "/status",
                             savedEntity.createdAt()
                     ));
                 });
@@ -107,22 +114,25 @@ public class FileService {
         return fileRepository.findByScanReferenceId(scanReferenceId)
                 .switchIfEmpty(Mono.error(new RuntimeException("File not found for scan reference: " + scanReferenceId)))
                 .flatMap(fileEntity -> {
-                    logger.info("Found file entity for scan reference: {} -> {}", scanReferenceId, fileEntity.id());
+                    logger.info("Found file entity for scan reference: {} -> {}", scanReferenceId, fileEntity.getId());
 
                     // Stream clean content directly to S3
                     return s3Service.uploadFile(cleanFileStream, fileEntity.s3Key(), fileEntity.contentType())
                             .flatMap(fileSize -> {
                                 // Update file metadata with final size and CLEAN status
-                                logger.info("S3 upload completed for file: {}, size: {} bytes", fileEntity.id(), fileSize);
+                                logger.info("S3 upload completed for file: {}, size: {} bytes", fileEntity.getId(), fileSize);
 
-                                FileEntity updatedEntity = fileEntity
-                                        .withFileSize(fileSize)
-                                        .withScanComplete();
+                                // Update entity using standard save
+                                fileEntity.setFileSize(fileSize);
+                                fileEntity.setStatus(FileStatus.CLEAN);
+                                fileEntity.setUpdatedAt(LocalDateTime.now());
+                                fileEntity.setScannedAt(LocalDateTime.now());
+                                fileEntity.markAsExisting();
 
-                                return fileRepository.save(updatedEntity);
+                                return fileRepository.save(fileEntity);
                             });
                 })
-                .doOnSuccess(savedEntity -> logger.info("File upload completed: {}", savedEntity.id()))
+                .doOnSuccess(savedEntity -> logger.info("File upload completed: {}", savedEntity.getId()))
                 .doOnError(error -> logger.error("Failed to handle scanned file: {}", error.getMessage()))
                 .then();
     }
@@ -134,13 +144,13 @@ public class FileService {
         return fileRepository.findById(fileId)
                 .switchIfEmpty(Mono.error(new RuntimeException("File not found: " + fileId)))
                 .map(fileEntity -> new FileStatusResponse(
-                        fileEntity.id(),
+                        fileEntity.getId(),
                         fileEntity.filename(),
                         fileEntity.contentType(),
                         fileEntity.fileSize(),
                         fileEntity.status(),
                         fileEntity.status() == FileStatus.CLEAN ?
-                                "/api/v1/files/" + fileEntity.id() + "/download" : null,
+                                "/api/v1/files/" + fileEntity.getId() + "/download" : null,
                         fileEntity.createdAt(),
                         fileEntity.updatedAt(),
                         fileEntity.scannedAt()
